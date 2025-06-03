@@ -48,25 +48,22 @@ fs.ls("/")
 
 - `checkin`, `checkout` : These methods are used to checkin/checkout a file.
   They take the path of the file to checkin/checkout as argument. The `checking`
-  method also take an additional `comment`.
+  method also take an additional `comment` argument.
 
 - `get_versions` : This method returns the list of versions of a file. It takes
   the path of the file as argument.
 
-- `preview` : This method returns a url to a preview of the file. It takes the
+- `preview` : This method returns a url to preview the file. It takes the
   path of the file as argument.
 
 - `get_content` : This method returns the content of a file. It takes the path
-  or the item_id of the file as argument. You can also pass the `format` argument
-  to specify the expected format of the content. This is useful for example to
-  convert a word document to a pdf.
+  or the item_id of the file as argument. You can also give the `format` argument
+  to specify the expected format of the content. It can be useful when converting a word document to a pdf.
 
-In addition to the methods above, some methods can take an `item_id` additional
-arguments. This argument is the id of the drive item provided by the Microsoft
-Graph API. It can be used to avoid the need to make an additional API call to
+In addition to the methods above, some methods can take an additional argument, `item_id`. This argument is the id of the drive item provided by the Microsoft
+Graph API. It can be used to avoid making an additional API call to
 get the item id or to store a reference to a drive item independently of the
-path. (If the drive item is moved, the path will change but the item id will
-not).
+path. (If the drive item is moved, the path will changed but the item id won't).
 
 ## Installation
 
@@ -80,7 +77,7 @@ To get the drive id of your drive, you can use the microsoft graph explorer:
 https://developer.microsoft.com/en-us/graph/graph-explorer
 
 The first step is to get the site id of your site. You can do this by making a
-GET request to the following url:
+`GET` request to the following url:
 
 ```bash
 https://graph.microsoft.com/v1.0/sites/{url}
@@ -93,8 +90,7 @@ site is `https://mycompany.sharepoint.com/sites/mysite`, you should use
 In the response, you will find the `id` of the site.
 
 
-Now your can get the drive id of the drive you want to access. To do this, you
-can make a GET request to the following url:
+Now, you can get your drive id by making a `GET` request to the following url:
 
 ```bash
   https://graph.microsoft.com/v1.0/sites/{site_id}/drives/
@@ -115,7 +111,7 @@ pip install -e .
 This will install the package in editable mode, so you can make changes to the
 code and test them without having to reinstall the package every time.
 
-To run the tests, you will need to install the test dependencies. You can do this by running:
+To run the tests, you will need to install the test dependencies. You can achieve this by running:
 
 ```bash
 pip install -e .[test]
@@ -150,11 +146,11 @@ client_id=<CLIENT_ID>
 &scope=offline_access%20User.Read%20Files.ReadWrite.All%20Sites.ReadWrite.All
 ```
 
-You will be prompted to log in with your Microsoft account and grant the requested permissions.
+You will be asked to log in with your Microsoft account and to grant the requested permissions.
 
 #### 2. Copy the Authorization Code
 
-After login, you'll be redirected to:
+Once logged in, you'll be redirected to:
 
 ```bash
 http://localhost:5000/callback?code=<AUTHORIZATION_CODE>
