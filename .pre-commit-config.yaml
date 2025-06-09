@@ -2,7 +2,7 @@ default_language_version:
   python: python3
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.12
+    rev: v0.11.13
     hooks:
       - id: ruff
         args:
@@ -15,7 +15,7 @@ repos:
       - id: check-yaml
       - id: end-of-file-fixer
       - id: trailing-whitespace
-  - repo: https://github.com/myint/docformatter
+  - repo: https://github.com/PyCQA/docformatter
     rev: v1.7.7
     hooks:
       - id: docformatter
