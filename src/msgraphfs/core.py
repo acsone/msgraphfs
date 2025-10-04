@@ -2,8 +2,11 @@ import asyncio
 import datetime
 import logging
 import mimetypes
+import os
 import re
+import threading
 import weakref
+from urllib.parse import urlparse
 
 import httpx
 from authlib.integrations.httpx_client import AsyncOAuth2Client
@@ -32,6 +35,19 @@ HTTPX_RETRYABLE_HTTP_STATUS_CODES = (500, 502, 503, 504)
 _logger = logging.getLogger(__name__)
 
 
+def get_running_loop():
+    """Get the currently running event loop."""
+    # this was removed from fsspec in https://github.com/fsspec/filesystem_spec/pull/1134
+    if hasattr(asyncio, "get_running_loop"):
+        return asyncio.get_running_loop()
+    else:
+        loop = asyncio._get_running_loop()
+        if loop is None:
+            raise RuntimeError("no running event loop")
+        else:
+            return loop
+
+
 def parse_range_header(range_header):
     # Regular expression to match a range header like 'bytes=0-499'
     range_pattern = r"bytes=(\d+)?-(\d+)?"
@@ -46,6 +62,78 @@ def parse_range_header(range_header):
         return start, end
     else:
         raise ValueError("Invalid Range header format")
+
+
+def parse_msgraph_url(url_path):  # noqa: C901
+    """Parse a msgraph URL to extract site_name, drive_name, and path.
+
+    Supports formats:
+    - msgd://site_name/drive_name/path/to/file
+    - sharepoint://site_name/drive_name/path/to/file
+    - onedrive://drive_name/path/to/file
+    - msgd://site_name/drive_name
+    - msgd://site_name
+
+    Args:
+        url_path: The URL or path to parse
+
+    Returns:
+        tuple: (site_name, drive_name, path) where path defaults to "/"
+    """
+    if not url_path:
+        return None, None, "/"
+
+    # Handle URL format
+    if "://" in url_path:
+        parsed = urlparse(url_path)
+        protocol = parsed.scheme.lower()
+        path_parts = parsed.path.strip("/").split("/") if parsed.path.strip("/") else []
+
+        if protocol in ["msgd", "sharepoint"]:
+            # msgd:// and sharepoint:// format: protocol://site_name/drive_name/path
+            site_name = parsed.netloc if parsed.netloc else None
+            if not path_parts:
+                return site_name, None, "/"
+            elif len(path_parts) == 1:
+                return site_name, path_parts[0], "/"
+            else:
+                return site_name, path_parts[0], "/" + "/".join(path_parts[1:])
+
+        elif protocol == "onedrive":
+            # onedrive:// format: onedrive://drive_name/path (no site, personal OneDrive)
+            # The netloc becomes the drive name for OneDrive
+            drive_name = parsed.netloc if parsed.netloc else None
+            if not drive_name and path_parts:
+                # If no netloc, first path part is drive name
+                drive_name = path_parts[0]
+                file_path = (
+                    "/" + "/".join(path_parts[1:]) if len(path_parts) > 1 else "/"
+                )
+            else:
+                # netloc is drive name, path is file path
+                file_path = "/" + "/".join(path_parts) if path_parts else "/"
+            return None, drive_name, file_path
+
+        else:
+            # Unknown protocol, treat like msgd://
+            site_name = parsed.netloc if parsed.netloc else None
+            if not path_parts:
+                return site_name, None, "/"
+            elif len(path_parts) == 1:
+                return site_name, path_parts[0], "/"
+            else:
+                return site_name, path_parts[0], "/" + "/".join(path_parts[1:])
+    else:
+        # Handle path-only format
+        path_parts = url_path.strip("/").split("/") if url_path.strip("/") else []
+        site_name = None
+
+        if not path_parts:
+            return site_name, None, "/"
+        elif len(path_parts) == 1:
+            return site_name, path_parts[0], "/"
+        else:
+            return site_name, path_parts[0], "/" + "/".join(path_parts[1:])
 
 
 def wrap_http_not_found_exceptions(func):
@@ -110,40 +198,130 @@ class AbstractMSGraphFS(AsyncFileSystem):
     def __init__(
         self,
         oauth2_client_params: dict,
+        asynchronous: bool = False,
+        loop=None,
         **kwargs,
     ):
+        from fsspec.asyn import get_loop
+
         super_kwargs = kwargs.copy()
         super_kwargs.pop("use_listings_cache", None)
         super_kwargs.pop("listings_expiry_time", None)
         super_kwargs.pop("max_paths", None)
         # passed to fsspec superclass... we don't support directory caching
-        super().__init__(**super_kwargs)
+        super().__init__(
+            asynchronous=asynchronous, loop=loop or get_loop(), **super_kwargs
+        )
 
-        self.client: AsyncOAuth2Client = AsyncOAuth2Client(
-            **oauth2_client_params,
+        # Store initialization parameters for lazy initialization
+        self._oauth2_client_params = oauth2_client_params
+        self._client = None
+        self._client_lock = threading.Lock() if not asynchronous else None
+        self._client_pid = None  # Track which process created the client
+        self.use_recycle_bin = kwargs.get("use_recycle_bin", False)
+
+    @property
+    def client(self) -> AsyncOAuth2Client:
+        """Lazy-initialized, fork-safe OAuth2 client."""
+        current_pid = os.getpid()
+
+        # Check if we need to initialize or reinitialize after fork
+        if self._client is None or self._client_pid != current_pid:
+            if self.asynchronous:
+                # For async mode, we can't use locks, but async is typically single-threaded
+                self._init_client()
+                self._client_pid = current_pid
+            else:
+                # Thread-safe lazy initialization for sync mode
+                with self._client_lock:
+                    # Double-check after acquiring lock
+                    if self._client is None or self._client_pid != current_pid:
+                        self._init_client()
+                        self._client_pid = current_pid
+
+        return self._client
+
+    def _init_client(self):
+        """Initialize the OAuth2 client."""
+        # Close existing client if it exists
+        if self._client is not None:
+            try:
+                # Try to close the old client gracefully
+                self.close_http_session(self._client, getattr(self, "loop", None))
+            except Exception:
+                # Ignore errors during cleanup
+                pass
+
+        # Create new client
+        self._client = AsyncOAuth2Client(
+            **self._oauth2_client_params,
             follow_redirects=True,
         )
+
+        # Register cleanup for non-async mode
         if not self.asynchronous:
-            weakref.finalize(self, self.close_http_session, self.client, self.loop)
-        self.use_recycle_bin = kwargs.get("use_recycle_bin", False)
+            weakref.finalize(self, self.close_http_session, self._client, self.loop)
+
+    def __del__(self):
+        """Destructor to ensure HTTP client is properly closed."""
+        try:
+            if hasattr(self, "client") and self.client:
+                self.close_http_session(self.client, getattr(self, "loop", None))
+        except Exception:
+            # Ignore all cleanup errors in destructor
+            pass
+
+    def _get_loop(self):
+        """Get the current event loop, following adlfs pattern."""
+        try:
+            # Need to confirm there is an event loop running in
+            # the thread. If not, create the fsspec loop
+            # and set it. This is to handle issues with
+            # Async Credentials from the Azure SDK
+            loop = get_running_loop()
+        except RuntimeError:
+            from fsspec.asyn import get_loop
+
+            loop = get_loop()
+            asyncio.set_event_loop(loop)
+
+        return loop
+
+    @property
+    def loop(self):
+        """Get the event loop for this filesystem."""
+        return self._get_loop()
 
     @staticmethod
     def close_http_session(
         client: AsyncOAuth2Client, loop: asyncio.AbstractEventLoop | None = None
     ):
-        """Close the HTTP session."""
-        if loop is not None and loop.is_running() and not loop.is_closed():
+        """Close the HTTP session safely."""
+        # Only attempt cleanup if we have a loop and it's still active
+        if loop is not None and not loop.is_closed():
             try:
-                loop = asyncio.get_event_loop()
-                loop.create_task(client.aclose())
-                return
-            except RuntimeError:
+                # Check if the loop is running
+                if loop.is_running():
+                    # Create a task to close the client
+                    loop.create_task(client.aclose())
+                    return
+                else:
+                    # If loop is not running, use sync with a short timeout
+                    sync(loop, client.aclose, timeout=0.1)
+                    return
+            except (RuntimeError, FSTimeoutError, Exception):
+                # Silently ignore cleanup errors - the process is shutting down
                 pass
-            try:
-                sync(loop, client.aclose, timeout=0.1)
-                return
-            except FSTimeoutError:
-                pass
+
+        # If we can't properly close, just ignore - this is cleanup code
+        try:
+            # Last resort: try to close synchronously if possible
+            if hasattr(client, "_client") and hasattr(client._client, "close"):
+                # Some HTTP clients have synchronous close methods
+                client._client.close()
+        except Exception:
+            # Ignore all cleanup errors - we're shutting down anyway
+            pass
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
         """This method must be implemented by subclasses to convert a path to a valid
@@ -151,6 +329,13 @@ class AbstractMSGraphFS(AsyncFileSystem):
         service.
 
         (OneDrive, SharePoint, etc.)
+        """
+        raise NotImplementedError
+
+    async def _path_to_url_async(self, path, item_id=None, action=None) -> str:
+        """Async version of _path_to_url.
+
+        Must be implemented by subclasses.
         """
         raise NotImplementedError
 
@@ -192,9 +377,135 @@ class AbstractMSGraphFS(AsyncFileSystem):
             ),
             "id": drive_item_info.get("id"),
         }
+
+        # Add webUrl if available
+        if "webUrl" in drive_item_info:
+            data["weburl"] = drive_item_info["webUrl"]
+
+        # Add mimetype for files
         if _type == "file":
-            data["mimetype"] = drive_item_info.get("file", {}).get("mimeType", "")
+            file_info = drive_item_info.get("file", {})
+            data["mimetype"] = file_info.get("mimeType", "")
+
+        # Add custom fields if available (typically from SharePoint lists)
+        if "fields" in drive_item_info:
+            data["fields"] = drive_item_info["fields"]
+
+        # Add permissions if they were expanded/included in the response
+        if "permissions" in drive_item_info:
+            data["permissions"] = self._format_permissions(
+                drive_item_info["permissions"]
+            )
+
         return data
+
+    def _format_permissions(self, permissions: list) -> dict:
+        """Format permissions from Microsoft Graph API into a more readable structure.
+
+        Args:
+            permissions: List of permission objects from Graph API
+
+        Returns:
+            dict: Formatted permissions with users, groups, and access levels
+        """
+        if not permissions:
+            return {
+                "users": [],
+                "groups": [],
+                "links": [],
+                "summary": {"total_permissions": 0},
+            }
+
+        users = []
+        groups = []
+        links = []
+
+        for perm in permissions:
+            perm_info = {
+                "id": perm.get("id"),
+                "roles": perm.get("roles", []),
+                "expires": perm.get("expirationDateTime"),
+                "has_password": perm.get("hasPassword", False),
+            }
+
+            # Handle different grantee types
+            granted_to = perm.get("grantedTo")
+            granted_to_identities = perm.get("grantedToIdentities", [])
+
+            if granted_to:
+                # Direct user/group permission
+                if granted_to.get("user"):
+                    user_info = granted_to["user"]
+                    users.append(
+                        {
+                            **perm_info,
+                            "type": "user",
+                            "email": user_info.get("email"),
+                            "display_name": user_info.get("displayName"),
+                            "id": user_info.get("id"),
+                        }
+                    )
+                elif granted_to.get("group"):
+                    group_info = granted_to["group"]
+                    groups.append(
+                        {
+                            **perm_info,
+                            "type": "group",
+                            "email": group_info.get("email"),
+                            "display_name": group_info.get("displayName"),
+                            "id": group_info.get("id"),
+                        }
+                    )
+
+            # Handle multiple identities (e.g., for sharing links)
+            for identity in granted_to_identities:
+                if identity.get("user"):
+                    user_info = identity["user"]
+                    users.append(
+                        {
+                            **perm_info,
+                            "type": "user",
+                            "email": user_info.get("email"),
+                            "display_name": user_info.get("displayName"),
+                            "id": user_info.get("id"),
+                        }
+                    )
+                elif identity.get("group"):
+                    group_info = identity["group"]
+                    groups.append(
+                        {
+                            **perm_info,
+                            "type": "group",
+                            "email": group_info.get("email"),
+                            "display_name": group_info.get("displayName"),
+                            "id": group_info.get("id"),
+                        }
+                    )
+
+            # Handle sharing links
+            link = perm.get("link")
+            if link:
+                links.append(
+                    {
+                        **perm_info,
+                        "type": "link",
+                        "link_type": link.get("type"),  # e.g., "view", "edit", "embed"
+                        "scope": link.get("scope"),  # e.g., "anonymous", "organization"
+                        "web_url": link.get("webUrl"),
+                    }
+                )
+
+        return {
+            "users": users,
+            "groups": groups,
+            "links": links,
+            "summary": {
+                "total_permissions": len(permissions),
+                "user_count": len(users),
+                "group_count": len(groups),
+                "link_count": len(links),
+            },
+        }
 
     async def _get_item_id(self, path: str, throw_on_missing=False) -> str | None:
         """Get the item ID of a file or directory.
@@ -205,7 +516,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         Returns:
         str: The item ID of the file or directory if it exists, otherwise None.
         """
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         try:
             response = await self._msgraph_get(url, params={"select": "id"})
             return response.json()["id"]
@@ -224,7 +535,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         use as an argument in other methods. see
         https://docs.microsoft.com/en-us/graph/api/resources/itemreference?view=graph-rest-1.0
         """
-        url = self._path_to_url(path, item_id=item_id)
+        url = await self._path_to_url_async(path, item_id=item_id)
         response = await self._msgraph_get(
             url,
             params={
@@ -244,6 +555,10 @@ class AbstractMSGraphFS(AsyncFileSystem):
         self, http_method: str, url: URLTypes, *args, **kwargs
     ) -> Response:
         """Call the Microsoft Graph API."""
+        # Ensure token is available before making requests
+        if self.client.token is None:
+            await self.client.fetch_token()
+
         return await _http_call_with_retry(
             self.client.request,
             args=(http_method, url, *args),
@@ -336,7 +651,9 @@ class AbstractMSGraphFS(AsyncFileSystem):
             a web application).
         """
         source_item_id = await self._get_item_id(path1, throw_on_missing=True)
-        url = self._path_to_url(path1, item_id=source_item_id, action="copy")
+        url = await self._path_to_url_async(
+            path1, item_id=source_item_id, action="copy"
+        )
         path2 = self._strip_protocol(path2)
         parent_path, _file_name = path2.rsplit("/", 1)
         item_reference = await self._get_item_reference(parent_path)
@@ -361,10 +678,12 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id = item_id or await self._get_item_id(path, throw_on_missing=True)
         use_recycle_bin = kwargs.get("use_recycle_bin", self.use_recycle_bin)
         if use_recycle_bin:
-            url = self._path_to_url(path, item_id=item_id)
+            url = await self._path_to_url_async(path, item_id=item_id)
             await self._msgraph_delete(url)
         else:
-            url = self._path_to_url(path, item_id=item_id, action="permanentDelete")
+            url = await self._path_to_url_async(
+                path, item_id=item_id, action="permanentDelete"
+            )
             await self._msgraph_post(url)
         self.invalidate_cache(path)
 
@@ -403,7 +722,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             you can pass "thumbnails" as the value of the expand parameter.
         """
 
-        url = self._path_to_url(path, item_id=item_id)
+        url = await self._path_to_url_async(path, item_id=item_id)
         params = {}
         if expand:
             params = {"expand": expand}
@@ -439,7 +758,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         kwargs: may have additional backend-specific options, such as version
             information
         """
-        url = self._path_to_url(path, item_id=item_id, action="children")
+        url = await self._path_to_url_async(path, item_id=item_id, action="children")
         params = None
         if expand and not detail:
             raise ValueError(
@@ -477,7 +796,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id: str | None = None,
         **kwargs,
     ):
-        url = self._path_to_url(path, item_id=item_id, action="content")
+        url = await self._path_to_url_async(path, item_id=item_id, action="content")
         headers = kwargs.get("headers", {})
         if start is not None or end is not None:
             range = await self._process_limits(path, start, end)
@@ -550,7 +869,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         )
 
     async def _isfile(self, path: str) -> bool:
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         try:
             response = await self._msgraph_get(url, params={"select": "file"})
         except FileNotFoundError:
@@ -558,7 +877,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         return response.json().get("file") is not None
 
     async def _isdir(self, path: str) -> bool:
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         try:
             response = await self._msgraph_get(url, params={"select": "folder"})
         except FileNotFoundError:
@@ -566,7 +885,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         return response.json().get("folder") is not None
 
     async def _size(self, path: str) -> int:
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         response = await self._msgraph_get(url, params={"select": "size"})
         return response.json().get("size", 0)
 
@@ -579,7 +898,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         if not parent_id:
             await self._mkdir(parent, create_parents=create_parents)
             parent_id = await self._get_item_id(parent)
-        url = self._path_to_url(path, item_id=parent_id, action="children")
+        url = await self._path_to_url_async(path, item_id=parent_id, action="children")
         response = await self._msgraph_post(
             url,
             json={
@@ -634,7 +953,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     async def _mv(self, path1, path2, **kwargs):
         source_item_id = await self._get_item_id(path1, throw_on_missing=True)
-        url = self._path_to_url(path1, item_id=source_item_id)
+        url = await self._path_to_url_async(path1, item_id=source_item_id)
         path2 = self._strip_protocol(path2)
         destination_item_id = await self._get_item_id(path2)
         item_reference = None
@@ -698,7 +1017,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             raise FileNotFoundError(f"File not found: {path}")
         if "a" in mode and not size:
             size = self.size(path)
-        return MSGraphBuffredFile(
+        return MSGraphBufferedFile(
             fs=self,
             path=path,
             mode=mode,
@@ -728,7 +1047,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             # size is provided, the info method will not be called from the constructor
             info = await self._info(path)
             size = info["size"]
-        return MSGrpahStreamedFile(
+        return MSGraphStreamedFile(
             self, path, mode, size=size, item_id=item_id, **kwargs
         )
 
@@ -738,14 +1057,16 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id = item_id or await self._get_item_id(path)
         if item_id and not truncate:
             if truncate:
-                url = self._path_to_url(path, item_id=item_id, action="content")
+                url = await self._path_to_url_async(
+                    path, item_id=item_id, action="content"
+                )
                 await self._msgraph_put(
                     url,
                     content=b"",
                     headers={"Content-Type": "application/octet-stream"},
                 )
             else:
-                url = self._path_to_url(path, item_id=item_id)
+                url = await self._path_to_url_async(path, item_id=item_id)
                 await self._msgraph_patch(
                     url, json={"lastModifiedDateTime": datetime.now().isoformat()}
                 )
@@ -753,7 +1074,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             parent_path, file_name = path.rsplit("/", 1)
             parent_id = await self._get_item_id(parent_path, throw_on_missing=True)
             item_id = f"{parent_id}:/{file_name}:"
-            url = self._path_to_url(path, item_id=item_id, action="content")
+            url = await self._path_to_url_async(path, item_id=item_id, action="content")
             headers = {"Content-Type": self._guess_type(path)}
             await self._msgraph_put(url, content=b"", headers=headers)
         self.invalidate_cache(path)
@@ -800,7 +1121,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             bytes: stream of content
         """
         params = params or {}
-        url = self._path_to_url(path, item_id=item_id, action="content")
+        url = await self._path_to_url_async(path, item_id=item_id, action="content")
         response = await self._msgraph_get(url, **params)
         return response.content
 
@@ -809,7 +1130,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
     async def _preview(self, path, item_id: str | None = None) -> str:
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="preview")
+        url = await self._path_to_url_async(path, item_id=item_id, action="preview")
         response = await self._msgraph_post(url)
         return response.json().get("getUrl", [])
 
@@ -829,7 +1150,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         """
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="checkout")
+        url = await self._path_to_url_async(path, item_id=item_id, action="checkout")
         await self._msgraph_post(url)
 
     checkout = sync_wrapper(_checkout)
@@ -850,7 +1171,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         """
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="checkin")
+        url = await self._path_to_url_async(path, item_id=item_id, action="checkin")
         await self._msgraph_post(url, json={"comment": comment})
 
     checkin = sync_wrapper(_checkin)
@@ -868,7 +1189,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         """
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="versions")
+        url = await self._path_to_url_async(path, item_id=item_id, action="versions")
         response = await self._msgraph_get(url)
         result = response.json()
         items = result.get("value", [])
@@ -891,7 +1212,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             If given, the item_id will be used instead of the path to get
             the SharePoint IDs of the file or directory.
         """
-        url = self._path_to_url(path, item_id=item_id)
+        url = await self._path_to_url_async(path, item_id=item_id)
         response = await self._msgraph_get(url, params={"select": "sharepointIds"})
         return response.json().get("sharepointIds", {})
 
@@ -926,35 +1247,454 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     set_properties = sync_wrapper(_set_properties)
 
+    async def _get_permissions(self, path: str, item_id: str | None = None) -> dict:
+        """Get detailed permissions for a file or directory.
+
+        This method fetches the permissions from the Microsoft Graph API and formats them
+        into a more readable structure showing users, groups, and sharing links with their
+        respective access levels.
+
+        Parameters
+        ----------
+        path : str
+            Path of the file or directory to get permissions for
+        item_id: str
+            If given, the item_id will be used instead of the path to get
+            the permissions for the file or directory.
+
+        Returns
+        -------
+        dict
+            Formatted permissions with users, groups, links, and summary information
+
+        Examples
+        --------
+        >>> permissions = fs.get_permissions("/documents/important.docx")
+        >>> print(f"Total permissions: {permissions['summary']['total_permissions']}")
+        >>> for user in permissions['users']:
+        ...     print(f"User: {user['display_name']} - Roles: {user['roles']}")
+        """
+        url = await self._path_to_url_async(path, item_id=item_id, action="permissions")
+        response = await self._msgraph_get(url)
+        result = response.json()
+        permissions = result.get("value", [])
+
+        # Handle pagination
+        while "@odata.nextLink" in result:
+            response = await self._msgraph_get(result["@odata.nextLink"])
+            result = response.json()
+            permissions.extend(result.get("value", []))
+
+        return self._format_permissions(permissions)
+
+    get_permissions = sync_wrapper(_get_permissions)
+
 
 class MSGDriveFS(AbstractMSGraphFS):
-    """A filesystem that represents a SharePoint site dirve as a filesystem.
+    """A unified filesystem for SharePoint sites and drives.
 
-    parameters:
-    drive_id (str): The ID of the SharePoint drive.
-    site_name (str): The name of the SharePoint site (optional, only used to list the recycle bin items).
-    use_recycle_bin: bool (=False)
-        If True, when a file is deleted, it will be moved to the recycle bin.
-        If False, the file will be permanently deleted. Default is False.
-    oauth2_client_params (dict): Parameters for the OAuth2 client to use for
-        authentication. see https://docs.authlib.org/en/latest/client/api.html#authlib.integrations.httpx_client.AsyncOAuth2Client
+    This class automatically handles both single-site/drive operations and multi-site operations
+    based on the parameters provided during initialization:
+
+    - Single-site mode: When site_name + drive_name or drive_id are provided
+    - Multi-site mode: When neither site_name + drive_name nor drive_id are provided
+
+    In multi-site mode, the filesystem can handle URL-based paths that specify
+    the site and drive dynamically (e.g., "msgd://SiteA/DriveB/file.txt").
+
+    Examples:
+    ---------
+    Single-site mode (traditional):
+        fs = MSGDriveFS(
+            client_id="your-client-id",
+            tenant_id="your-tenant-id",
+            client_secret="your-secret",
+            site_name="TestSite",
+            drive_name="Documents"
+        )
+        files = fs.ls("/folder/file.txt")  # operates on TestSite/Documents
+
+    Single-site mode with URL initialization:
+        fs = MSGDriveFS(
+            client_id="your-client-id",
+            tenant_id="your-tenant-id",
+            client_secret="your-secret",
+            url_path="msgd://TestSite/Documents"
+        )
+        files = fs.ls("/folder/file.txt")  # operates on TestSite/Documents
+
+    Multi-site mode:
+        fs = MSGDriveFS(
+            client_id="your-client-id",
+            tenant_id="your-tenant-id",
+            client_secret="your-secret"
+        )
+        files = fs.ls("msgd://TestSite/Documents/folder/file.txt")  # dynamic routing
+
+    Using with fsspec (recommended):
+        import fsspec
+
+        # Single-site via fsspec
+        fs = fsspec.filesystem(
+            "msgd",
+            client_id="...",
+            tenant_id="...",
+            client_secret="...",
+            site_name="TestSite",
+            drive_name="Documents"
+        )
+        files = fs.ls("/folder/")
+
+        # Multi-site via fsspec
+        fs = fsspec.filesystem("msgd", client_id="...", tenant_id="...", client_secret="...")
+        files = fs.ls("msgd://TestSite/Documents/folder/")
+
+    Parameters:
+    -----------
+    drive_id : str, optional
+        The ID of the SharePoint drive. If provided, enables single-site mode.
+    client_id : str, optional
+        OAuth2 client ID. Can also be set via MSGRAPHFS_CLIENT_ID or AZURE_CLIENT_ID environment variables.
+    tenant_id : str, optional
+        OAuth2 tenant ID. Can also be set via MSGRAPHFS_TENANT_ID or AZURE_TENANT_ID environment variables.
+    client_secret : str, optional
+        OAuth2 client secret. Can also be set via MSGRAPHFS_CLIENT_SECRET or AZURE_CLIENT_SECRET environment variables.
+    site_name : str, optional
+        The name of the SharePoint site. If provided with drive_name, enables single-site mode.
+    drive_name : str, optional
+        The name of the SharePoint drive/library (e.g., "Documents", "CustomLibrary").
+        If provided with site_name, enables single-site mode.
+    url_path : str, optional
+        URL-style path specification (e.g., "msgd://TestSite/Documents").
+        If provided, extracts site_name and drive_name from the URL.
+        URL parameters override direct site_name/drive_name parameters.
+    oauth2_client_params : dict, optional
+        Parameters for the OAuth2 client. If not provided, will be built from client_id, tenant_id, client_secret.
+    use_recycle_bin : bool, optional
+        If True, deleted files are moved to recycle bin. Default is False.
+    **kwargs : dict
+        Additional arguments passed to the parent class.
     """
 
-    protocol = ["msgd"]
+    protocol = ("msgd", "sharepoint", "onedrive")
+
+    # Default OAuth2 scopes for Microsoft Graph API (client credentials flow)
+    DEFAULT_SCOPES = ["https://graph.microsoft.com/.default"]
 
     def __init__(
         self,
-        drive_id: str,
-        oauth2_client_params: dict,
+        drive_id: str | None = None,
+        client_id: str | None = None,
+        tenant_id: str | None = None,
+        client_secret: str | None = None,
         site_name: str | None = None,
+        drive_name: str | None = None,
+        oauth2_client_params: dict | None = None,
+        asynchronous: bool = False,
+        loop=None,
+        url_path: str | None = None,
         **kwargs,
     ):
-        super().__init__(oauth2_client_params=oauth2_client_params, **kwargs)
-        self.site_name: str = site_name
-        self.drive_id: str = drive_id
-        self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+        # Get OAuth2 credentials from parameters or environment variables
+        # Check MSGRAPHFS_* variables first, then fall back to standard AZURE_* variables
+        self.client_id = (
+            client_id
+            or os.getenv("MSGRAPHFS_CLIENT_ID")
+            or os.getenv("AZURE_CLIENT_ID")
+        )
+        self.tenant_id = (
+            tenant_id
+            or os.getenv("MSGRAPHFS_TENANT_ID")
+            or os.getenv("AZURE_TENANT_ID")
+        )
+        self.client_secret = (
+            client_secret
+            or os.getenv("MSGRAPHFS_CLIENT_SECRET")
+            or os.getenv("AZURE_CLIENT_SECRET")
+        )
+
+        # Parse URL path if provided to extract site_name and drive_name
+        if url_path:
+            parsed_site, parsed_drive, _ = parse_msgraph_url(url_path)
+            # URL parameters override direct parameters
+            site_name = parsed_site or site_name
+            drive_name = parsed_drive or drive_name
+
+        # Determine operation mode (single-site if site and drive provided, OR drive_id provided)
+        self._multi_site_mode = not ((site_name and drive_name) or drive_id)
+
+        # Set site_name and drive_name attributes for all modes
+        self.site_name = site_name
+        self.drive_name = drive_name
+
+        if self._multi_site_mode:
+            # Multi-site mode: cache for drive filesystem instances
+            self._drive_cache = {}
+            # Store credentials for creating drive instances
+            self._stored_client_id = self.client_id
+            self._stored_tenant_id = self.tenant_id
+            self._stored_client_secret = self.client_secret
+            self._stored_oauth2_client_params = oauth2_client_params
+            self._stored_kwargs = kwargs.copy()
+
+        # Build oauth2_client_params if not provided
+        if oauth2_client_params is None:
+            if not all([self.client_id, self.tenant_id, self.client_secret]):
+                raise ValueError(
+                    "Either oauth2_client_params must be provided, or all of "
+                    "client_id, tenant_id, and client_secret must be provided "
+                    "(either as parameters or environment variables MSGRAPHFS_CLIENT_ID/"
+                    "AZURE_CLIENT_ID, MSGRAPHFS_TENANT_ID/AZURE_TENANT_ID, "
+                    "MSGRAPHFS_CLIENT_SECRET/AZURE_CLIENT_SECRET)"
+                )
+
+            # Build OAuth2 client parameters with proper configuration
+            oauth2_client_params = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "token_endpoint": f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token",
+                "scope": " ".join(self.DEFAULT_SCOPES),
+                "grant_type": "client_credentials",
+            }
+        else:
+            # Extract credentials from provided params for later use
+            self.client_id = oauth2_client_params.get("client_id")
+            self.tenant_id = self._extract_tenant_from_token_endpoint(
+                oauth2_client_params.get("token_endpoint", "")
+            )
+            self.client_secret = oauth2_client_params.get("client_secret")
+
+        super().__init__(
+            oauth2_client_params=oauth2_client_params,
+            asynchronous=asynchronous,
+            loop=loop,
+            **kwargs,
+        )
+
+        self.site_name = site_name
+        self.drive_name = drive_name
+        self.drive_id = drive_id
+
+        # We'll set the drive_url later if drive_id is determined
+        if self.drive_id:
+            self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+        else:
+            self.drive_url = None
+
+    def _parse_path_for_url_routing(self, path: str):
+        """Parse a path to extract site_name, drive_name, and file path for URL
+        routing."""
+        site_name, drive_name, file_path = parse_msgraph_url(path)
+        if not site_name:
+            raise ValueError(f"Path must include site name: {path}")
+        if not drive_name:
+            raise ValueError(f"Path must include drive name: {path}")
+        return site_name, drive_name, file_path
+
+    def _extract_tenant_from_token_endpoint(self, token_endpoint: str) -> str | None:
+        """Extract tenant_id from token endpoint URL."""
+        import re
+
+        match = re.search(r"/([a-f0-9-]+)/oauth2", token_endpoint)
+        return match.group(1) if match else None
+
+    def _parse_path_for_missing_components(self, path: str):
+        """Parse a path to extract missing site_name, drive_name, and return the file
+        path.
+
+        Logic:
+        - If both site_name and drive_name are set: path is the file path
+        - If only site_name is set: path = drive_name/file_path
+        - If neither is set: path = site_name/drive_name/file_path
+        """
+        # If we have both site and drive, no parsing needed
+        if self.site_name and self.drive_name:
+            return self.site_name, self.drive_name, path
+
+        # Parse the path to extract missing components
+        if "://" in path:
+            # Handle URL format
+            parsed_site, parsed_drive, file_path = parse_msgraph_url(path)
+            # For OneDrive URLs, use a default site name if none specified
+            if parsed_site is None and "onedrive://" in path.lower():
+                site_name = self.site_name or "me"  # Use "me" as default OneDrive site
+            else:
+                site_name = self.site_name or parsed_site
+            drive_name = self.drive_name or parsed_drive
+        else:
+            # Handle plain path format
+            if not self.site_name and not self.drive_name:
+                # Need both site and drive from path: site/drive/file_path
+                path_parts = path.strip("/").split("/", 2)
+                if len(path_parts) < 2:
+                    raise ValueError(
+                        f"Path must include site and drive when none specified: {path}"
+                    )
+                site_name = path_parts[0]
+                drive_name = path_parts[1]
+                file_path = "/" + path_parts[2] if len(path_parts) > 2 else "/"
+            elif self.site_name and not self.drive_name:
+                # Need drive from path: drive/file_path
+                path_parts = path.strip("/").split("/", 1)
+                if len(path_parts) < 1:
+                    raise ValueError(
+                        f"Path must include drive name when not specified: {path}"
+                    )
+                site_name = self.site_name
+                drive_name = path_parts[0]
+                file_path = "/" + path_parts[1] if len(path_parts) > 1 else "/"
+            else:
+                # This shouldn't happen but handle gracefully
+                site_name = self.site_name
+                drive_name = self.drive_name
+                file_path = path
+
+        if not site_name or not drive_name:
+            raise ValueError(f"Unable to determine site and drive from path: {path}")
+
+        return site_name, drive_name, file_path
+
+    def _get_drive_fs(self, site_name: str, drive_name: str) -> "MSGDriveFS":
+        """Get or create a MSGDriveFS instance for the specified site and drive."""
+        # If this instance already has the right site/drive, return self
+        if self.site_name == site_name and self.drive_name == drive_name:
+            return self
+
+        # If we have a drive cache, use it (always available in multi-site mode)
+        if hasattr(self, "_drive_cache") and self._drive_cache is not None:
+            cache_key = (site_name, drive_name)
+            if cache_key not in self._drive_cache:
+                self._drive_cache[cache_key] = MSGDriveFS(
+                    client_id=self.client_id,
+                    tenant_id=self.tenant_id,
+                    client_secret=self.client_secret,
+                    site_name=site_name,
+                    drive_name=drive_name,
+                    asynchronous=self.asynchronous,
+                    loop=self.loop,
+                )
+            return self._drive_cache[cache_key]
+
+        # No caching needed, create a new instance
+        return MSGDriveFS(
+            client_id=self.client_id,
+            tenant_id=self.tenant_id,
+            client_secret=self.client_secret,
+            site_name=site_name,
+            drive_name=drive_name,
+            asynchronous=self.asynchronous,
+            loop=self.loop,
+        )
+
+    # Delegation methods for multi-site operations (used when _multi_site_mode is True)
+    async def _ls_multi_site(self, path: str, detail: bool = True, **kwargs):
+        """List files in multi-site mode by delegating to appropriate drive
+        filesystem."""
+        site_name, drive_name, file_path = self._parse_path_for_url_routing(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return await drive_fs._ls(file_path, detail=detail, **kwargs)
+
+    async def _info_multi_site(self, path: str, **kwargs):
+        """Get file info in multi-site mode by delegating to appropriate drive
+        filesystem."""
+        site_name, drive_name, file_path = self._parse_path_for_url_routing(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return await drive_fs._info(file_path, **kwargs)
+
+    async def _cat_file_multi_site(
+        self, path: str, start: int | None = None, end: int | None = None, **kwargs
+    ):
+        """Read file content in multi-site mode by delegating to appropriate drive
+        filesystem."""
+        site_name, drive_name, file_path = self._parse_path_for_url_routing(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return await drive_fs._cat_file(file_path, start=start, end=end, **kwargs)
+
+    def _open_multi_site(self, path: str, mode: str = "rb", **kwargs):
+        """Open file in multi-site mode by delegating to appropriate drive
+        filesystem."""
+        site_name, drive_name, file_path = self._parse_path_for_url_routing(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return drive_fs._open(file_path, mode=mode, **kwargs)
+
+    # Override existing methods to delegate to multi-site variants when needed
+    async def _ls(self, path: str, detail: bool = True, **kwargs):
+        """List files, delegating to multi-site logic if needed."""
+        if self._multi_site_mode:
+            return await self._ls_multi_site(path, detail=detail, **kwargs)
+        return await super()._ls(path, detail=detail, **kwargs)
+
+    async def _info(self, path: str, **kwargs):
+        """Get file info, delegating to multi-site logic if needed."""
+        if self._multi_site_mode:
+            return await self._info_multi_site(path, **kwargs)
+        return await super()._info(path, **kwargs)
+
+    async def _cat_file(
+        self, path: str, start: int | None = None, end: int | None = None, **kwargs
+    ):
+        """Read file content, delegating to multi-site logic if needed."""
+        if self._multi_site_mode:
+            return await self._cat_file_multi_site(path, start=start, end=end, **kwargs)
+        return await super()._cat_file(path, start=start, end=end, **kwargs)
+
+    def _open(self, path: str, mode: str = "rb", **kwargs):
+        """Open file, delegating to multi-site logic if needed."""
+        if self._multi_site_mode:
+            return self._open_multi_site(path, mode=mode, **kwargs)
+        return super()._open(path, mode=mode, **kwargs)
+
+    async def _ensure_drive_id(self) -> str:
+        """Ensure drive_id is available, discovering it if necessary."""
+        if self.drive_id:
+            return self.drive_id
+
+        if not self.site_name:
+            # Try to get the default drive for the current user
+            try:
+                response = await self._msgraph_get(
+                    "https://graph.microsoft.com/v1.0/me/drive"
+                )
+                drive_info = response.json()
+                self.drive_id = drive_info["id"]
+                self.drive_url = (
+                    f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+                )
+                return self.drive_id
+            except Exception as e:
+                raise ValueError(
+                    "Unable to discover drive_id. Please provide either drive_id or site_name."
+                ) from e
+        else:
+            # Get site_id from site_name, then get specific drive by name or default drive
+            site_id = await self._get_site_id()
+
+            if self.drive_name:
+                # Find specific drive by name
+                drive_id = await self._get_drive_id_by_name(site_id, self.drive_name)
+                self.drive_id = drive_id
+                self.drive_url = (
+                    f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+                )
+                return self.drive_id
+            else:
+                # Get default drive
+                response = await self._msgraph_get(
+                    f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive"
+                )
+                drive_info = response.json()
+                self.drive_id = drive_info["id"]
+                self.drive_url = (
+                    f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+                )
+                return self.drive_id
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
+        # For sync methods, we need to ensure drive_id is available
+        if not self.drive_url:
+            # Use sync wrapper to ensure drive_id
+            self.ensure_drive_id()
+
         action = action and f"/{action}" if action else ""
         path = self._strip_protocol(path).rstrip("/")
         if path and not path.startswith("/"):
@@ -966,12 +1706,43 @@ class MSGDriveFS(AbstractMSGraphFS):
 
         return f"{self.drive_url}/root{path}{action}"
 
+    async def _path_to_url_async(self, path, item_id=None, action=None) -> str:
+        """Async version of _path_to_url that ensures drive_id is available."""
+        if not self.drive_url:
+            await self._ensure_drive_id()
+        return self._path_to_url(path, item_id, action)
+
     async def _get_site_id(self) -> str:
-        url = f"https://graph.microsoft.com/v1.0/sites?search=¼{self.site_name}"
+        if not self.site_name:
+            raise ValueError("site_name is required to get site_id")
+        url = f"https://graph.microsoft.com/v1.0/sites?search={self.site_name}"
         response = await self._msgraph_get(url)
-        return response.json()["value"][0]["id"]
+        sites = response.json().get("value", [])
+        if not sites:
+            raise ValueError(f"No site found with name '{self.site_name}'")
+        return sites[0]["id"]
+
+    async def _get_drive_id_by_name(self, site_id: str, drive_name: str) -> str:
+        """Get the drive ID for a specific drive name within a site."""
+        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+        response = await self._msgraph_get(url)
+        drives = response.json().get("value", [])
+
+        for drive in drives:
+            if drive.get("name") == drive_name:
+                return drive["id"]
+
+        # If not found, list available drives for error message
+        available_drives = [d.get("name", "Unknown") for d in drives]
+        raise ValueError(
+            f"Drive '{drive_name}' not found in site '{self.site_name}'. "
+            f"Available drives: {available_drives}"
+        )
 
     async def _get_item_reference(self, path: str, item_id: str | None = None) -> dict:
+        # Ensure drive_id is available
+        if not self.drive_id:
+            await self._ensure_drive_id()
         item_reference = await super()._get_item_reference(path, item_id=item_id)
         return {
             "driveId": self.drive_id,
@@ -992,6 +1763,89 @@ class MSGDriveFS(AbstractMSGraphFS):
         return response.json().get("value", [])
 
     get_recycle_bin_items = sync_wrapper(_get_recycle_bin_items)
+    ensure_drive_id = sync_wrapper(_ensure_drive_id)
+    get_drive_id_by_name = sync_wrapper(_get_drive_id_by_name)
+
+    # Override filesystem operations to support path-based site/drive resolution
+    async def _ls(self, path: str, detail: bool = True, **kwargs):
+        """List files, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        # If we got back ourselves, use normal behavior
+        if drive_fs is self:
+            return await super()._ls(file_path, detail=detail, **kwargs)
+        else:
+            # Delegate to the appropriate drive filesystem
+            return await drive_fs._ls(file_path, detail=detail, **kwargs)
+
+    async def _info(self, path: str, **kwargs):
+        """Get file info, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._info(file_path, **kwargs)
+        else:
+            return await drive_fs._info(file_path, **kwargs)
+
+    async def _cat_file(
+        self, path: str, start: int | None = None, end: int | None = None, **kwargs
+    ):
+        """Read file content, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._cat_file(file_path, start=start, end=end, **kwargs)
+        else:
+            return await drive_fs._cat_file(file_path, start=start, end=end, **kwargs)
+
+    def _open(self, path: str, mode: str = "rb", **kwargs):
+        """Open file, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return super()._open(file_path, mode=mode, **kwargs)
+        else:
+            return drive_fs._open(file_path, mode=mode, **kwargs)
+
+    async def _exists(self, path: str, **kwargs):
+        """Check if file exists, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._exists(file_path, **kwargs)
+        else:
+            return await drive_fs._exists(file_path, **kwargs)
+
+    async def _mkdir(
+        self, path: str, create_parents: bool = True, exist_ok: bool = False, **kwargs
+    ):
+        """Create directory, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._mkdir(
+                file_path, create_parents=create_parents, exist_ok=exist_ok, **kwargs
+            )
+        else:
+            return await drive_fs._mkdir(
+                file_path, create_parents=create_parents, exist_ok=exist_ok, **kwargs
+            )
+
+    async def _rm(self, path: str, recursive: bool = False, **kwargs):
+        """Remove file/directory, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._rm(file_path, recursive=recursive, **kwargs)
+        else:
+            return await drive_fs._rm(file_path, recursive=recursive, **kwargs)
 
 
 class AsyncStreamedFileMixin:
@@ -1224,7 +2078,7 @@ class AsyncStreamedFileMixin:
         return self.fs.loop
 
 
-class MSGraphBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
+class MSGraphBufferedFile(AsyncStreamedFileMixin, AbstractBufferedFile):
     """A file-like object representing a file in a SharePoint drive.
 
     Parameters
@@ -1311,7 +2165,7 @@ class MSGraphBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
     _fetch_range = sync_wrapper(AsyncStreamedFileMixin._fetch_range)
 
 
-class MSGrpahStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
+class MSGraphStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
     """A file-like object representing a file in a SharePoint drive.
 
     Parameters

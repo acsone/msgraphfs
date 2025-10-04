@@ -1,0 +1,81 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - name: Install dependencies
+      run: |
+        uv sync --all-extras --dev
+
+    - name: Lint with ruff
+      run: |
+        uv run ruff check .
+
+    - name: Run tests (excluding live credential tests)
+      run: |
+        uv run pytest tests/ -v -m "not live" --cov=msgraphfs --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        file: ./coverage.xml
+        fail_ci_if_error: true
+
+  test-with-credentials:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: testing-with-credentials
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - name: Install dependencies
+      run: |
+        uv sync --all-extras --dev
+
+    - name: Run live credential tests (if credentials available)
+      env:
+        MSGRAPHFS_CLIENT_ID: ${{ secrets.MSGRAPHFS_CLIENT_ID }}
+        MSGRAPHFS_TENANT_ID: ${{ secrets.MSGRAPHFS_TENANT_ID }}
+        MSGRAPHFS_CLIENT_SECRET: ${{ secrets.MSGRAPHFS_CLIENT_SECRET }}
+      run: |
+        if [ -n "$MSGRAPHFS_CLIENT_ID" ] && [ -n "$MSGRAPHFS_TENANT_ID" ] && [ -n "$MSGRAPHFS_CLIENT_SECRET" ]; then
+          echo "Running live credential tests..."
+          uv run pytest tests/ -v -m "live" --tb=short
+        else
+          echo "Skipping live credential tests - credentials not configured"
+        fi

@@ -5,7 +5,7 @@ from array import array
 
 import pytest
 
-from . import content
+# Test data is now provided via fixtures in conftest.py
 
 
 def test_touch(temp_fs):
@@ -294,9 +294,9 @@ async def test_async_move(temp_afs):
     assert await fs._cat("/orig/nested/file2.txt") == b"hello world"
 
 
-def test_read_block(temp_fs):
+def test_read_block(temp_fs, all_test_data):
     fs = temp_fs
-    data = content.files["test/accounts.1.json"]
+    data = all_test_data["files"]["test/accounts.1.json"]
     lines = io.BytesIO(data).readlines()
     path = "/test.csv"
     fs.pipe_file(path, data)
@@ -401,9 +401,9 @@ async def test_async_open_no_write(temp_afs):
     assert await fs._cat("/test.csv") == b""
 
 
-def test_append(temp_nested_fs):
+def test_append(temp_nested_fs, all_test_data):
     fs = temp_nested_fs
-    data = content.text_files["nested/file1"]
+    data = all_test_data["text_files"]["nested/file1"]
     assert fs.cat("/nested/file1") == data
     with fs.open("/nested/file1", "ab") as f:
         assert f.tell() == len(data)  # append, no write, small file
@@ -442,9 +442,9 @@ def test_append(temp_nested_fs):
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_async_append(temp_nested_afs):
+async def test_async_append(temp_nested_afs, all_test_data):
     fs = temp_nested_afs
-    data = content.text_files["nested/file1"]
+    data = all_test_data["text_files"]["nested/file1"]
     assert await fs._cat("/nested/file1") == data
     async with await fs._open_async("/nested/file1", "ab") as f:
         assert f.tell() == len(data)
@@ -509,11 +509,11 @@ async def test_async_write_array(temp_afs):
         assert out == b"A" * 1000
 
 
-def test_upload_with_prefix(temp_fs):
+def test_upload_with_prefix(temp_fs, all_test_data):
     fs = temp_fs
     sfs = temp_fs.fs
 
-    data = content.text_files["nested/file1"]
+    data = all_test_data["text_files"]["nested/file1"]
     path = f"msgd://{fs.path}/file1"
     sfs.pipe_file(path, data)
     assert sfs.cat(path) == data

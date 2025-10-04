@@ -4,7 +4,7 @@ from itertools import chain
 
 import pytest
 
-from . import content
+# Test data is now provided via fixtures in conftest.py
 
 
 def test_ls(sample_fs):
@@ -76,14 +76,20 @@ def test_ls_detail(sample_fs):
         (
             "/test/accounts.1.json",
             "file",
-            len(content.files["test/accounts.1.json"]),
+            133,  # pre-calculated length from test data
             "/test/accounts.1.json",
             "application/json",
         ),
     ],
 )
 def test_info(
-    sample_fs, path, expected_type, expected_size, expected_name, expected_mimetype
+    sample_fs,
+    all_test_data,
+    path,
+    expected_type,
+    expected_size,
+    expected_name,
+    expected_mimetype,
 ):
     fs = sample_fs
     file_info = fs.info(path)
@@ -115,7 +121,7 @@ def test_info(
         (
             "/test/accounts.1.json",
             "file",
-            len(content.files["test/accounts.1.json"]),
+            133,  # pre-calculated length from test data
             "/test/accounts.1.json",
             "application/json",
         ),
@@ -219,47 +225,47 @@ async def test_async_isfile(sample_afs):
     assert not await fs._isfile("/unknwown")
 
 
-def test_du(sample_fs):
+def test_du(sample_fs, all_test_data):
     fs = sample_fs
     assert fs.du("/test") == sum(
         [
-            len(content.files["test/accounts.1.json"]),
-            len(content.files["test/accounts.2.json"]),
+            len(all_test_data["files"]["test/accounts.1.json"]),
+            len(all_test_data["files"]["test/accounts.2.json"]),
         ]
     )
 
     assert fs.du("/nested") == sum(
         [
-            len(content.text_files["nested/file1"]),
-            len(content.text_files["nested/file2"]),
-            len(content.text_files["nested/nested2/file1"]),
-            len(content.text_files["nested/nested2/file2"]),
+            len(all_test_data["text_files"]["nested/file1"]),
+            len(all_test_data["text_files"]["nested/file2"]),
+            len(all_test_data["text_files"]["nested/nested2/file1"]),
+            len(all_test_data["text_files"]["nested/nested2/file2"]),
         ]
     )
-    assert fs.du("/file.dat") == len(content.glob_files["file.dat"])
+    assert fs.du("/file.dat") == len(all_test_data["glob_files"]["file.dat"])
 
     assert fs.du("/emptydir") == 0
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_async_du(sample_afs):
+async def test_async_du(sample_afs, all_test_data):
     fs = sample_afs
     assert await fs._du("/test") == sum(
         [
-            len(content.files["test/accounts.1.json"]),
-            len(content.files["test/accounts.2.json"]),
+            len(all_test_data["files"]["test/accounts.1.json"]),
+            len(all_test_data["files"]["test/accounts.2.json"]),
         ]
     )
 
     assert await fs._du("/nested") == sum(
         [
-            len(content.text_files["nested/file1"]),
-            len(content.text_files["nested/file2"]),
-            len(content.text_files["nested/nested2/file1"]),
-            len(content.text_files["nested/nested2/file2"]),
+            len(all_test_data["text_files"]["nested/file1"]),
+            len(all_test_data["text_files"]["nested/file2"]),
+            len(all_test_data["text_files"]["nested/nested2/file1"]),
+            len(all_test_data["text_files"]["nested/nested2/file2"]),
         ]
     )
-    assert await fs._du("/file.dat") == len(content.glob_files["file.dat"])
+    assert await fs._du("/file.dat") == len(all_test_data["glob_files"]["file.dat"])
 
     assert await fs._du("/emptydir") == 0
 
@@ -383,10 +389,14 @@ async def test_async_bad_open(sample_afs):
         await fs.fs.open_async(fs._join("/test"), "r")
 
 
-def test_readline(sample_fs):
+def test_readline(sample_fs, all_test_data):
     fs = sample_fs
     all_items = chain.from_iterable(
-        [content.files.items(), content.csv_files.items(), content.text_files.items()]
+        [
+            all_test_data["files"].items(),
+            all_test_data["csv_files"].items(),
+            all_test_data["text_files"].items(),
+        ]
     )
     for k, data in all_items:
         with fs.open(f"/{k}", "rb") as f:
@@ -423,9 +433,9 @@ def test_readline_blocksize(temp_fs):
         assert result == expected
 
 
-def test_next(sample_fs):
+def test_next(sample_fs, all_test_data):
     path = "csv/2014-01-01.csv"
-    expected = content.csv_files[path].split(b"\n")[0] + b"\n"
+    expected = all_test_data["csv_files"][path].split(b"\n")[0] + b"\n"
     with sample_fs.open(path) as f:
         result = next(f)
         assert result == expected
@@ -480,10 +490,14 @@ def test_writable(temp_fs):
         assert not f.writable()
 
 
-def test_cat(sample_fs):
+def test_cat(sample_fs, all_test_data):
     fs = sample_fs
     all_items = chain.from_iterable(
-        [content.files.items(), content.csv_files.items(), content.text_files.items()]
+        [
+            all_test_data["files"].items(),
+            all_test_data["csv_files"].items(),
+            all_test_data["text_files"].items(),
+        ]
     )
     for k, data in all_items:
         read = fs.cat(f"/{k}")
@@ -491,20 +505,24 @@ def test_cat(sample_fs):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_async_cat(sample_afs):
+async def test_async_cat(sample_afs, all_test_data):
     fs = sample_afs
     all_items = chain.from_iterable(
-        [content.files.items(), content.csv_files.items(), content.text_files.items()]
+        [
+            all_test_data["files"].items(),
+            all_test_data["csv_files"].items(),
+            all_test_data["text_files"].items(),
+        ]
     )
     for k, data in all_items:
         read = await fs._cat(f"/{k}")
         assert read == data
 
 
-def test_read_block(sample_fs):
+def test_read_block(sample_fs, all_test_data):
     fs = sample_fs
     path = "csv/2014-01-01.csv"
-    data = content.csv_files[path]
+    data = all_test_data["csv_files"][path]
     out = []
     with fs.open(path, "rb", block_size=3) as f:
         while True:
@@ -516,10 +534,10 @@ def test_read_block(sample_fs):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_async_read_block(sample_afs):
+async def test_async_read_block(sample_afs, all_test_data):
     fs = sample_afs
     path = "csv/2014-01-01.csv"
-    data = content.csv_files[path]
+    data = all_test_data["csv_files"][path]
     out = []
     async with await fs._open_async(path, "rb", block_size=3) as f:
         while True:
@@ -530,10 +548,10 @@ async def test_async_read_block(sample_afs):
     assert b"".join(out) == data
 
 
-def test_readinto(sample_fs):
+def test_readinto(sample_fs, all_test_data):
     fs = sample_fs
     path = "csv/2014-01-01.csv"
-    data = content.csv_files[path]
+    data = all_test_data["csv_files"][path]
     out = bytearray(len(data))
     with fs.open(path, "rb") as f:
         f.readinto(out)
@@ -541,20 +559,20 @@ def test_readinto(sample_fs):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_async_readinto(sample_afs):
+async def test_async_readinto(sample_afs, all_test_data):
     fs = sample_afs
     path = "csv/2014-01-01.csv"
-    data = content.csv_files[path]
+    data = all_test_data["csv_files"][path]
     out = bytearray(len(data))
     async with await fs._open_async(path, "rb") as f:
         await f.readinto(out)
     assert out == data
 
 
-def test_readuntil(sample_fs):
+def test_readuntil(sample_fs, all_test_data):
     fs = sample_fs
     path = "csv/2014-01-01.csv"
-    data = content.csv_files[path]
+    data = all_test_data["csv_files"][path]
     out = []
     with fs.open(path, "rb") as f:
         while True:
