@@ -32,14 +32,13 @@ jobs:
 
     - name: Run tests (excluding live credential tests)
       run: |
-        uv run pytest tests/ -v -m "not live" --cov=msgraphfs --cov-report=xml --cov-report=term-missing
+        uv run pytest tests/ -v -m "not live" --cov --cov-branch --cov-report=xml
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
-        file: ./coverage.xml
-        fail_ci_if_error: true
+        slug: acsone/msgraphfs
 
   test-with-credentials:
     runs-on: ubuntu-latest
