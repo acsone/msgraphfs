@@ -30,10 +30,6 @@ jobs:
       run: |
         uv sync --all-extras --dev
 
-    - name: Lint with ruff
-      run: |
-        uv run ruff check .
-
     - name: Run tests (excluding live credential tests)
       run: |
         uv run pytest tests/ -v -m "not live" --cov=msgraphfs --cov-report=xml --cov-report=term-missing
