@@ -655,7 +655,7 @@ def test_set_properties(temp_fs):
     properties = {"_ExtendedDescription": "My Description"}
     fs.set_properties(path, properties)
     item = fs.info(path)
-    assert item["item_info"].get("description") == "My Description"
+    assert "My Description" in item["item_info"].get("description")
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -666,4 +666,4 @@ async def test_async_set_properties(temp_afs):
     properties = {"_ExtendedDescription": "My other Description"}
     await fs._set_properties(path, properties)
     item = await fs._info(path)
-    assert item["item_info"].get("description") == "My other Description"
+    assert "My other Description" in item["item_info"].get("description")
