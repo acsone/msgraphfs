@@ -19,7 +19,7 @@ dependencies = [
     "httpx[http2]",
     "authlib",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 test = [
@@ -88,3 +88,16 @@ filename = "HISTORY.md"
 directory = "news"
 issue_format = "`#[{issue}](https://acsone.plan.io/issues/{issue}>`_"
 title_format = "{version} ({project_date})"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: marks tests as requiring live credentials (deselect with '-m \"not live\"')",
+    "credentials: marks tests as requiring credentials (deselect with '-m \"not credentials\"')",
+]
+addopts = "-v"

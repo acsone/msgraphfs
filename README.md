@@ -1,200 +1,186 @@
-# MSGraphFS
+Filesystem interface to Microsoft Graph API (SharePoint, OneDrive)
+------------------------------------------------------------
 
-This python package is a [fsspec](https://filesystem-spec.readthedocs.io/) based filesystem-like interface to drives exposed through the Microsoft graph API (OneDrive, Sharepoint, etc).
+[![PyPI version shields.io](https://img.shields.io/pypi/v/msgraphfs.svg)](https://pypi.python.org/pypi/msgraphfs/)
 
-see:
-https://learn.microsoft.com/en-us/graph/api/resources/onedrive?view=graph-rest-1.0
+Quickstart
+----------
 
-## Usage
+This package can be installed using:
 
-To use the Microsoft Drive filesystem (for exemple a sharepoint documents libraty), you need to create a new instance of the
-`msgraphfs.MSGDriveFS` class. You can also use the `msgd` protocol to lookup the
-class using `fsspec.get_filesystem_class`.
+`pip install msgraphfs`
+
+or
+
+`uv add msgraphfs`
+
+The `msgd://`, `sharepoint://`, and `onedrive://` protocols are included in fsspec's known_implementations registry, allowing seamless integration with fsspec-compatible libraries.
+
+To use the filesystem with specific site and drive:
 
 ```python
-import msgraphfs
+import pandas as pd
 
-fs = msgraphfs.MSGDriveFS(
-    client_id="YOUR_CLIENT_ID",
-    drive_id="YOUR_DRIVE_ID",
-    oauth2_client_params = {...})
+storage_options = {
+    'client_id': 'your-client-id',
+    'tenant_id': 'your-tenant-id',
+    'client_secret': 'your-client-secret',
+    'site_name': 'YourSiteName',
+    'drive_name': 'Documents'
+}
 
-fs.ls("/")
-
-with fs.open("/path/to/file.txt") as f:
-    print(f.read())
+df = pd.read_csv('msgd://folder/data.csv', storage_options=storage_options)
 ```
 
-```python
+To use multi-site mode where site and drive are specified in the URL:
 
+```python
+import pandas as pd
+
+storage_options = {
+    'client_id': 'your-client-id',
+    'tenant_id': 'your-tenant-id',
+    'client_secret': 'your-client-secret'
+}
+
+df = pd.read_csv('msgd://YourSite/Documents/folder/data.csv', storage_options=storage_options)
+df = pd.read_parquet('sharepoint://AnotherSite/Reports/data.parquet', storage_options=storage_options)
+```
+
+Accepted protocol / uri formats include:
+- `msgd://site/drive/path/file` (multi-site mode)
+- `sharepoint://site/drive/path/file` (multi-site mode)
+- `onedrive://drive/path/file` (OneDrive personal)
+- `msgd://path/file` (single-site mode when site_name and drive_name specified in storage_options)
+
+To read files, you can optionally set the `MSGRAPHFS_CLIENT_ID`, `MSGRAPHFS_TENANT_ID`, and `MSGRAPHFS_CLIENT_SECRET` environment variables, then storage_options will be read from the environment:
+
+```python
+import pandas as pd
+
+# With environment variables set, you can omit credentials from storage_options
+storage_options = {'site_name': 'YourSite', 'drive_name': 'Documents'}
+df = pd.read_csv('msgd://folder/data.csv', storage_options=storage_options)
+```
+
+Details
+-------
+
+The package provides a pythonic filesystem implementation for Microsoft Graph API drives (SharePoint and OneDrive), facilitating interactions between Microsoft 365 services and data processing libraries like Pandas, Dask, and others. This is implemented using the [fsspec](https://filesystem-spec.readthedocs.io/) base class and Microsoft Graph Python SDK.
+
+Operations work with Azure AD application credentials using the client credentials flow, suitable for server-to-server authentication scenarios.
+
+The filesystem automatically handles OAuth2 token management, site and drive discovery, and provides fork-safe lazy initialization perfect for multi-process environments like Apache Airflow.
+
+### Setting credentials
+
+The `storage_options` can be instantiated with the following authentication parameters:
+
+**Required for authentication:**
+- `client_id`: Azure AD application (client) ID
+- `tenant_id`: Azure AD directory (tenant) ID
+- `client_secret`: Azure AD application client secret
+
+**Optional filesystem parameters:**
+- `site_name`: SharePoint site name (for single-site mode or site discovery)
+- `drive_name`: Drive/library name (e.g., "Documents", "CustomLibrary")
+- `drive_id`: Specific drive ID (bypasses site/drive discovery)
+- `oauth2_client_params`: Pre-built OAuth2 parameters dict
+- `use_recycle_bin`: Enable recycle bin operations (default: False)
+
+For more details on all available parameters, see the [MSGDriveFS documentation](https://github.com/your-repo/msgraphfs).
+
+The following environment variables can be set and will be automatically detected:
+- `MSGRAPHFS_CLIENT_ID` (or `AZURE_CLIENT_ID` as fallback)
+- `MSGRAPHFS_TENANT_ID` (or `AZURE_TENANT_ID` as fallback)
+- `MSGRAPHFS_CLIENT_SECRET` (or `AZURE_CLIENT_SECRET` as fallback)
+
+### Usage modes
+
+The filesystem can be used in different modes based on the `storage_options` provided:
+
+1. **Single-site mode**: Specify `site_name` and `drive_name` in storage_options, then use relative paths in URLs:
+   ```python
+   storage_options = {
+       'client_id': CLIENT_ID,
+       'tenant_id': TENANT_ID,
+       'client_secret': CLIENT_SECRET,
+       'site_name': 'YourSite',
+       'drive_name': 'Documents'
+   }
+   df = pd.read_csv('msgd://folder/file.csv', storage_options=storage_options)
+   ```
+
+2. **Multi-site mode**: Omit `site_name` and `drive_name` from storage_options, specify them in the URL:
+   ```python
+   storage_options = {
+       'client_id': CLIENT_ID,
+       'tenant_id': TENANT_ID,
+       'client_secret': CLIENT_SECRET
+   }
+   df = pd.read_csv('msgd://YourSite/Documents/folder/file.csv', storage_options=storage_options)
+   ```
+
+3. **Direct drive access**: Use `drive_id` to bypass site discovery:
+   ```python
+   storage_options = {
+       'client_id': CLIENT_ID,
+       'tenant_id': TENANT_ID,
+       'client_secret': CLIENT_SECRET,
+       'drive_id': 'specific-drive-id'
+   }
+   df = pd.read_csv('msgd://folder/file.csv', storage_options=storage_options)
+   ```
+
+### Advanced features
+
+#### File operations with metadata
+```python
 import fsspec
 
-fs = fsspec.get_filesystem_class("msgd")(
-    client_id="YOUR_CLIENT
-    drive_id="YOUR_DRIVE_ID",
-    oauth2_client_params = {...})
+fs = fsspec.filesystem('msgd', **storage_options)
 
-fs.ls("/")
+# List files with detailed metadata
+files = fs.ls('/folder', detail=True)
 
+# Get file information with permissions
+info = fs.info('/document.pdf', expand='permissions')
+
+# Read file with version control
+with fs.open('/document.docx', mode='r') as f:
+    content = f.read()
 ```
 
-### Specific functionalities
-
-- `ls`, `info` : Both methods can take an `expand` additional argument. This
-  argument is a string that will be passed as the `expand` query parameter to
-  the microsoft graph API call used to get the file information. This can be
-  used to get additional information about the file, such as the `thumbnails` or
-  the `permissions` or ...
-
-- `checkin`, `checkout` : These methods are used to checkin/checkout a file.
-  They take the path of the file to checkin/checkout as argument. The `checking`
-  method also take an additional `comment` argument.
-
-- `get_versions` : This method returns the list of versions of a file. It takes
-  the path of the file as argument.
-
-- `preview` : This method returns a url to preview the file. It takes the
-  path of the file as argument.
-
-- `get_content` : This method returns the content of a file. It takes the path
-  or the item_id of the file as argument. You can also give the `format` argument
-  to specify the expected format of the content. It can be useful when converting a word document to a pdf.
-
-In addition to the methods above, some methods can take an additional argument, `item_id`. This argument is the id of the drive item provided by the Microsoft
-Graph API. It can be used to avoid making an additional API call to
-get the item id or to store a reference to a drive item independently of the
-path. (If the drive item is moved, the path will changed but the item id won't).
-
-## Installation
-
-```bash
-pip install msgraphfs
+#### Permission management
+```python
+# Get detailed permissions for files and folders
+permissions = fs.get_permissions('/sensitive-folder')
+print(f"Total permissions: {permissions['summary']['total_permissions']}")
 ```
 
-### Get your drive id
+#### Integration with data processing libraries
+```python
+import dask.dataframe as dd
 
-To get the drive id of your drive, you can use the microsoft graph explorer:
-https://developer.microsoft.com/en-us/graph/graph-explorer
+# Read multiple CSV files using Dask
+ddf = dd.read_csv('msgd://YourSite/Data/*.csv', storage_options=storage_options)
 
-The first step is to get the site id of your site. You can do this by making a
-`GET` request to the following url:
-
-```bash
-https://graph.microsoft.com/v1.0/sites/{url}
+# Read Parquet files
+ddf = dd.read_parquet('sharepoint://Reports/Analytics/data.parquet', storage_options=storage_options)
 ```
 
-where `{url}` is the url of your site without the protocol. For example, if your
-site is `https://mycompany.sharepoint.com/sites/mysite`, you should use
-`mycompany.sharepoint.com/sites/mysite` as the url.
+### Azure AD Setup
 
-In the response, you will find the `id` of the site.
+To use this filesystem, you need to register an Azure AD application:
 
+1. Go to the [Azure Portal](https://portal.azure.com)
+2. Register a new application under "Azure Active Directory" > "App registrations"
+3. Configure API permissions (Application permissions). Choose based on your needs:
+   - For read-only access: `Sites.Read.All`
+   - For read-write access: `Sites.ReadWrite.All`
+   - Optional for enhanced functionality: `Files.Read.All` or `Files.ReadWrite.All`
+4. Grant admin consent for your organization
+5. Create a client secret
+6. Note the Application (client) ID, Directory (tenant) ID, and client secret
 
-Now, you can get your drive id by making a `GET` request to the following url:
-
-```bash
-  https://graph.microsoft.com/v1.0/sites/{site_id}/drives/
-```
-
-where `{site_id}` is the id of the site you got in the previous step.
-
-## Development
-
-To develop this package, you can clone the repository and install the
-dependencies using pip:
-
-```bash
-git clone your-repo-url (a fork of https://github.com/acsone/msgraphfs)
-pip install -e .
-```
-
-This will install the package in editable mode, so you can make changes to the
-code and test them without having to reinstall the package every time.
-
-To run the tests, you will need to install the test dependencies. You can achieve this by running:
-
-```bash
-pip install -e .[test]
-```
-
-Testing the package requires you to have access to a Microsoft Drive (OneDrive, Sharepoint, etc) and to have the `client_id`, `client_secret`, `tenant_id`, `dirve_id`, `site_name` and the user's
-access token.
-
-### How to get an access token required for testing
-
-The first step is to get your user's access token.
-
-
-### Prerequisites
-
-- A registered Azure AD application with:
-  - `client_id` and `client_secret`
-  - Delegated permissions granted (e.g., `Files.ReadWrite.All`, `Sites.ReadWrite.All`)
-  - A redirect URI configured (e.g., `http://localhost:5000/callback`)
-
-
-#### 1. Build the OAuth2 authorization URL
-
-Open the following URL in your browser (replace values as needed):
-
-```bash
-https://login.microsoftonline.com/<TENANT_ID>/oauth2/v2.0/authorize?
-client_id=<CLIENT_ID>
-&response_type=code
-&redirect_uri=http://localhost:5000/callback
-&response_mode=query
-&scope=offline_access%20User.Read%20Files.ReadWrite.All%20Sites.ReadWrite.All
-```
-
-You will be asked to log in with your Microsoft account and to grant the requested permissions.
-
-#### 2. Copy the Authorization Code
-
-Once logged in, you'll be redirected to:
-
-```bash
-http://localhost:5000/callback?code=<AUTHORIZATION_CODE>
-```
-
-Copy the value of `code` from the URL.
-
-
-### Launch the test suite
-
-To run the test suite, you just need to run the pytest command in the root directory with the following arguments:
-
-* --auth-code: The authorization code you got in the previous step. (It's only required if you launch the tests for the first time or if your refresh token is expired and you need to get a new access token)
-* --client-id: The client id of your Azure AD application.
-* --client-secret: The client secret of your Azure AD application.
-* --tenant-id: The tenant id of your Azure AD application.
-* --drive-id: The drive id of the drive you want to access.
-* --site-name: The name of the site you want to access. (Only required for tests related to the access to the recycling bin)
-
-```bash
-pytest --auth-code <AUTH_CODE> \
-       --client-id <CLIENT_ID> \
-       --client-secret <CLIENT_SECRET> \
-       --tenant-id <TENANT_ID> \
-       --drive-id <DRIVE_ID> \
-       --site-name <SITE_NAME> \
-       tests
-```
-
-Alternatively, you can set the environment variables `MSGRAPHFS_AUTH_CODE`, `MSGRAPHFS_CLIENT_ID`, `MSGRAPHFS_CLIENT_SECRET`, `MSGRAPHFS_TENANT_ID`, `MSGRAPHFS_DRIVE_ID` and `MSGRAPHFS_SITE_NAME` to avoid passing the arguments to pytest.
-
-When the auth-code is provided and we need to get the access token (IOW when it's the first time you run the tests or when your refresh token is expired), the package will automatically get the access token and store it
-in a encrypted file into the keyring of your system. The call to the token endpoint requires a `redirect_uri` parameter. This one should match one of the redirect URIs you configured in your Azure AD application.
-By default, it is set to `http://localhost:8069/microsoft_account/authentication`, but you can change it by setting the environment variable `MSGRAPHFS_AUTH_REDIRECT_URI` or by passing the `--auth-redirect-uri` argument to pytest.
-
-### Pre-commit hooks
-
-To ensure code quality, this package uses pre-commit hooks. You can install them by running:
-
-```bash
-pre-commit install
-```
-This will set up the pre-commit hooks to run automatically before each commit. You can also run them manually by executing:
-
-```bash
-pre-commit run --all-files
-```
+The filesystem uses the OAuth2 client credentials flow with the default scope (`https://graph.microsoft.com/.default`), which automatically includes all application permissions granted to your Azure AD application.

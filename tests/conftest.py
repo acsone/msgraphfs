@@ -15,10 +15,72 @@ from fsspec.implementations.dirfs import DirFileSystem
 
 from msgraphfs import MSGDriveFS
 
-from . import content
+# Test data fixtures are defined below instead of importing from content.py
 
 LOGIN_URL = "https://login.microsoftonline.com"
 SCOPES = ["offline_access", "openid", "Files.ReadWrite.All", "Sites.ReadWrite.All"]
+
+
+# Test data fixtures
+@pytest.fixture(scope="session")
+def test_files():
+    """Test file data for JSON files."""
+    return {
+        "test/accounts.1.json": (
+            b'{"amount": 100, "name": "Alice"}\n'
+            b'{"amount": 200, "name": "Bob"}\n'
+            b'{"amount": 300, "name": "Charlie"}\n'
+            b'{"amount": 400, "name": "Dennis"}\n'
+        ),
+        "test/accounts.2.json": (
+            b'{"amount": 500, "name": "Alice"}\n'
+            b'{"amount": 600, "name": "Bob"}\n'
+            b'{"amount": 700, "name": "Charlie"}\n'
+            b'{"amount": 800, "name": "Dennis"}\n'
+        ),
+    }
+
+
+@pytest.fixture(scope="session")
+def test_csv_files():
+    """Test file data for CSV files."""
+    return {
+        "csv/2014-01-01.csv": (
+            b"name,amount,id\nAlice,100,1\nBob,200,2\nCharlie,300,3\n"
+        ),
+        "csv/2014-01-02.csv": (b"name,amount,id\n"),
+        "csv/2014-01-03.csv": (
+            b"name,amount,id\nDennis,400,4\nEdith,500,5\nFrank,600,6\n"
+        ),
+    }
+
+
+@pytest.fixture(scope="session")
+def test_text_files():
+    """Test file data for text files."""
+    return {
+        "nested/file1": b"hello\n",
+        "nested/file2": b"world",
+        "nested/nested2/file1": b"hello\n",
+        "nested/nested2/file2": b"world",
+    }
+
+
+@pytest.fixture(scope="session")
+def test_glob_files():
+    """Test file data for glob pattern tests."""
+    return {"file.dat": b"", "filexdat": b""}
+
+
+@pytest.fixture(scope="session")
+def all_test_data(test_files, test_csv_files, test_text_files, test_glob_files):
+    """Combined test data for convenience."""
+    return {
+        "files": test_files,
+        "csv_files": test_csv_files,
+        "text_files": test_text_files,
+        "glob_files": test_glob_files,
+    }
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -176,8 +238,8 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
             or not drive_id
             or not tenant_id
         ):
-            pytest.fail(
-                "Missing required configuration options: --client-id, --client-secret, "
+            pytest.skip(
+                "Skipping test - missing credentials. Please provide: --client-id, --client-secret, "
                 "--site-name, --drive-id, --tenant-id or their environment variables."
             )
         auth_code = request.config.getoption("--auth-code") or os.getenv(
@@ -368,9 +430,9 @@ async def _a_temp_dir(storagefs):
 
 
 @pytest.fixture(scope="module")
-def sample_fs(fs):
-    """A temporary filesystem with sample files and directories created from the content
-    module.
+def sample_fs(fs, all_test_data):
+    """A temporary filesystem with sample files and directories created from test data
+    fixtures.
 
     We use the fsspec dir filesystem to interact with the filesystem to
     test so we can use a temporary directory into the tested filesystem
@@ -380,10 +442,10 @@ def sample_fs(fs):
     with _temp_dir(fs) as temp_dir_name:
         sfs = MsGraphTempFS(path=temp_dir_name, fs=fs)
         for flist in [
-            content.files,
-            content.csv_files,
-            content.text_files,
-            content.glob_files,
+            all_test_data["files"],
+            all_test_data["csv_files"],
+            all_test_data["text_files"],
+            all_test_data["glob_files"],
         ]:
             for path, data in flist.items():
                 root, _filename = os.path.split(path)
@@ -396,9 +458,9 @@ def sample_fs(fs):
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def sample_afs(afs):
-    """A temporary async filesystem with sample files and directories created from the
-    content module.
+async def sample_afs(afs, all_test_data):
+    """A temporary async filesystem with sample files and directories created from test
+    data fixtures.
 
     We use the fsspec dir filesystem to interact with the filesystem to
     test so we can use a temporary directory into the tested filesystem
@@ -408,10 +470,10 @@ async def sample_afs(afs):
     async with _a_temp_dir(afs) as temp_dir_name:
         sfs = MsGraphTempFS(path=temp_dir_name, asynchronous=True, fs=afs)
         for flist in [
-            content.files,
-            content.csv_files,
-            content.text_files,
-            content.glob_files,
+            all_test_data["files"],
+            all_test_data["csv_files"],
+            all_test_data["text_files"],
+            all_test_data["glob_files"],
         ]:
             for path, data in flist.items():
                 root, _filename = os.path.split(path)
@@ -458,7 +520,7 @@ async def temp_afs(function_afs):
 
 
 @pytest.fixture(scope="function")
-def temp_nested_fs(fs):
+def temp_nested_fs(fs, test_text_files):
     """A temporary empty filesystem with nested directories.
 
     We use the fsspec dir filesystem to interact with the filesystem to
@@ -468,7 +530,7 @@ def temp_nested_fs(fs):
     """
     with _temp_dir(fs) as temp_dir_name:
         sfs = MsGraphTempFS(path=temp_dir_name, fs=fs)
-        for path, data in content.text_files.items():
+        for path, data in test_text_files.items():
             root, _filename = os.path.split(path)
             if root:
                 sfs.makedirs(root, exist_ok=True)
@@ -479,7 +541,7 @@ def temp_nested_fs(fs):
 
 
 @pytest_asyncio.fixture(scope="function", loop_scope="function")
-async def temp_nested_afs(function_afs):
+async def temp_nested_afs(function_afs, test_text_files):
     """A temporary empty async filesystem with nested directories.
 
     We use the fsspec dir filesystem to interact with the filesystem to
@@ -491,7 +553,7 @@ async def temp_nested_afs(function_afs):
     # is created within an other loop scope
     async with _a_temp_dir(afs) as temp_dir_name:
         sfs = MsGraphTempFS(path=temp_dir_name, asynchronous=True, fs=afs)
-        for path, data in content.text_files.items():
+        for path, data in test_text_files.items():
             root, _filename = os.path.split(path)
             if root:
                 await sfs._makedirs(root, exist_ok=True)
