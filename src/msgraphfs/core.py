@@ -891,7 +891,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     async def _mkdir(self, path, create_parents=True, exist_ok=False, **kwargs) -> str:
         path = self._strip_protocol(path).rstrip("/")
-        parent, child = path.rsplit("/", 1)
+        parent, child = path.rsplit("/", 1) if "/" in path else ("", path)
         parent_id = await self._get_item_id(parent)
         if not parent_id and not create_parents:
             raise FileNotFoundError(f"Parent directory does not exists: {parent}")
@@ -1071,7 +1071,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
                     url, json={"lastModifiedDateTime": datetime.now().isoformat()}
                 )
         else:
-            parent_path, file_name = path.rsplit("/", 1)
+            parent_path, file_name = path.rsplit("/", 1) if "/" in path else ("", path)
             parent_id = await self._get_item_id(parent_path, throw_on_missing=True)
             item_id = f"{parent_id}:/{file_name}:"
             url = await self._path_to_url_async(path, item_id=item_id, action="content")
