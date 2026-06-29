@@ -2,8 +2,7 @@
 """Live tests for URL-based features using real SharePoint credentials.
 
 These tests require valid SharePoint credentials to run successfully.
-Run with: pytest -m live
-Skip with: pytest -m "not live"
+Run with: pytest -m live Skip with: pytest -m "not live"
 """
 
 # Test site and drive names (credentials should be provided via environment variables)

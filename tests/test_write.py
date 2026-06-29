@@ -529,7 +529,6 @@ def test_text_io__basic(temp_fs):
 
 def test_text_io__stream_wrapper_works(temp_fs):
     """Ensure using TextIOWrapper works."""
-
     with temp_fs.open("file.txt", "wb") as fd:
         fd.write("\u00af\\_(\u30c4)_/\u00af".encode("utf-16-le"))
 
