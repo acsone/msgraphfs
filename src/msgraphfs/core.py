@@ -728,7 +728,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         response = await self._msgraph_get(url, params=params)
         return self._drive_item_info_to_fsspec_info(response.json())
 
-    async def _ls(
+    async def _ls(  # noqa: C901
         self,
         path: str,
         detail: bool = True,
@@ -767,13 +767,21 @@ class AbstractMSGraphFS(AsyncFileSystem):
             params = {"select": "name,parentReference"}
         if expand:
             params = {"expand": expand}
-        response = await self._msgraph_get(url, params=params)
-        result = response.json()
-        items = result.get("value", [])
-        while "@odata.nextLink" in result:
-            response = await self._msgraph_get(result["@odata.nextLink"])
+        items = []
+        try:
+            response = await self._msgraph_get(url, params=params)
             result = response.json()
-            items.extend(result.get("value", []))
+            items = result.get("value", [])
+            while "@odata.nextLink" in result:
+                response = await self._msgraph_get(result["@odata.nextLink"])
+                result = response.json()
+                items.extend(result.get("value", []))
+        except HTTPStatusError as e:
+            if (
+                not e.response.status_code == 422
+                and "getChildrenOnNonFolder" not in e.response.content
+            ):
+                raise e
         if not items:
             # maybe the path is a file
             try:
