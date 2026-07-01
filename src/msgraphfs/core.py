@@ -721,7 +721,6 @@ class AbstractMSGraphFS(AsyncFileSystem):
             For example, if you want to expand the properties to include the thumbnails,
             you can pass "thumbnails" as the value of the expand parameter.
         """
-
         url = await self._path_to_url_async(path, item_id=item_id)
         params = {}
         if expand:
@@ -1095,7 +1094,6 @@ class AbstractMSGraphFS(AsyncFileSystem):
         refresh : bool (=False)
             if False, look in local cache for file details first
         """
-
         info = await self._info(path, refresh=refresh)
 
         if info["type"] != "directory":
@@ -1766,12 +1764,13 @@ class MSGDriveFS(AbstractMSGraphFS):
         }
 
     async def _get_recycle_bin_items(self) -> list[dict]:
-        """Get the items in the recycle bin. (Beta!!)
+        """Get the items in the recycle bin.
 
-        Returns:
-            list[dict]: A list of dictionaries with information about the items in the recycle bin.
+        (Beta!!)
+                Returns:
+                    list[dict]: A list of dictionaries with information about the items in the recycle bin.
 
-        see https://docs.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0
+                see https://docs.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0
         """
         site_id = await self._get_site_id()
         url = f"https://graph.microsoft.com/beta/sites/{site_id}/recycleBin/items"

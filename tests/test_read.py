@@ -586,9 +586,9 @@ def test_readuntil(sample_fs, all_test_data):
 def test_shallow_find(sample_fs):
     """Test that find method respects maxdepth.
 
-    Verify that the ``find`` method respects the ``maxdepth`` parameter.  With
-    ``maxdepth=1``, the results of ``find`` should be the same as those of
-    ``ls``, without returning subdirectories.
+    Verify that the ``find`` method respects the ``maxdepth`` parameter.
+    With ``maxdepth=1``, the results of ``find`` should be the same as
+    those of ``ls``, without returning subdirectories.
     """
     path = "/"
     ls_output = sample_fs.ls(path, detail=False)

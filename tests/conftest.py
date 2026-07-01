@@ -467,6 +467,7 @@ async def sample_afs(afs, all_test_data):
     as root to avoid polluting the real filesystem and ensure isolation
     between tests.
     """
+
     async with _a_temp_dir(afs) as temp_dir_name:
         sfs = MsGraphTempFS(path=temp_dir_name, asynchronous=True, fs=afs)
         for flist in [
