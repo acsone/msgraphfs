@@ -23,6 +23,32 @@ async def test_async_touch(temp_afs):
     assert await fs._exists("/newfile")
 
 
+def test_touch_top_level_path_without_slash(fs):
+    # regression test for https://github.com/acsone/msgraphfs/pull/11:
+    # creating a file directly at the root of the drive (i.e. a path with
+    # no "/" once stripped) used to raise a ValueError while unpacking
+    # path.rsplit("/", 1)
+    name = f"test-touch-root-{uuid.uuid4()}"
+    assert not fs.exists(name)
+    try:
+        fs.touch(name)
+        assert fs.exists(name)
+    finally:
+        fs.rm_file(name)
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_touch_top_level_path_without_slash(function_afs):
+    fs = function_afs
+    name = f"test-touch-root-{uuid.uuid4()}"
+    assert not await fs._exists(name)
+    try:
+        await fs._touch(name)
+        assert await fs._exists(name)
+    finally:
+        await fs._rm_file(name)
+
+
 def test_rm(temp_nested_fs):
     fs = temp_nested_fs
     assert fs.exists("/emptyfile")
@@ -160,6 +186,32 @@ async def test_async_mkdir(temp_afs):
     assert await fs._exists(nested_path)
 
 
+def test_mkdir_top_level_path_without_slash(fs):
+    # regression test for https://github.com/acsone/msgraphfs/pull/11:
+    # creating a directory directly at the root of the drive (i.e. a path
+    # with no "/" once stripped) used to raise a ValueError while
+    # unpacking path.rsplit("/", 1)
+    name = f"test-mkdir-root-{uuid.uuid4()}"
+    assert not fs.exists(name)
+    try:
+        fs.mkdir(name)
+        assert fs.exists(name)
+    finally:
+        fs.rm(name, recursive=True)
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_mkdir_top_level_path_without_slash(function_afs):
+    fs = function_afs
+    name = f"test-mkdir-root-{uuid.uuid4()}"
+    assert not await fs._exists(name)
+    try:
+        await fs._mkdir(name)
+        assert await fs._exists(name)
+    finally:
+        await fs._rm(name, recursive=True)
+
+
 def test_makedirs(temp_fs):
     fs = temp_fs
     assert not fs.exists("/newdir")
@@ -197,6 +249,20 @@ def test_copy(temp_fs):
         f.write(b"hello world")
     fs.copy("/file1.txt", "/file2.txt")
     assert fs.cat("/file1.txt") == fs.cat("/file2.txt")
+
+
+def test_copy_to_top_level_path_without_slash(fs):
+    src = f"test-copy-src-{uuid.uuid4()}"
+    dest = f"test-copy-dest-{uuid.uuid4()}"
+    fs.pipe_file(src, b"hello world")
+    try:
+        fs.copy(src, dest)
+        assert fs.exists(dest)
+        assert fs.cat(dest) == b"hello world"
+    finally:
+        fs.rm_file(src)
+        if fs.exists(dest):
+            fs.rm_file(dest)
 
 
 def test_get_item_id_from_file_handler(temp_fs):
@@ -242,6 +308,22 @@ async def test_async_copy(temp_afs):
     assert await fs._cat("/file1.txt") == await fs._cat("/file2.txt")
 
 
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_copy_to_top_level_path_without_slash(function_afs):
+    fs = function_afs
+    src = f"test-copy-src-{uuid.uuid4()}"
+    dest = f"test-copy-dest-{uuid.uuid4()}"
+    await fs._pipe_file(src, b"hello world")
+    try:
+        await fs._copy(src, dest)
+        assert await fs._exists(dest)
+        assert await fs._cat(dest) == b"hello world"
+    finally:
+        await fs._rm_file(src)
+        if await fs._exists(dest):
+            await fs._rm_file(dest)
+
+
 def test_copy_recursive(temp_fs):
     fs = temp_fs
     fs.makedirs("/orig/nested")
@@ -278,6 +360,22 @@ def test_move(temp_fs):
     assert fs.cat("/orig/nested/file2.txt") == b"hello world"
 
 
+def test_move_to_top_level_path_without_slash(fs):
+    src = f"test-move-src-{uuid.uuid4()}"
+    dest = f"test-move-dest-{uuid.uuid4()}"
+    fs.pipe_file(src, b"hello world")
+    try:
+        fs.move(src, dest)
+        assert not fs.exists(src)
+        assert fs.exists(dest)
+        assert fs.cat(dest) == b"hello world"
+    finally:
+        if fs.exists(src):
+            fs.rm_file(src)
+        if fs.exists(dest):
+            fs.rm_file(dest)
+
+
 @pytest.mark.asyncio(loop_scope="function")
 async def test_async_move(temp_afs):
     fs = temp_afs
@@ -292,6 +390,24 @@ async def test_async_move(temp_afs):
     assert not await fs._exists("/file2.txt")
     assert await fs._exists("/orig/nested/file2.txt")
     assert await fs._cat("/orig/nested/file2.txt") == b"hello world"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_move_to_top_level_path_without_slash(function_afs):
+    fs = function_afs
+    src = f"test-move-src-{uuid.uuid4()}"
+    dest = f"test-move-dest-{uuid.uuid4()}"
+    await fs._pipe_file(src, b"hello world")
+    try:
+        await fs._mv(src, dest)
+        assert not await fs._exists(src)
+        assert await fs._exists(dest)
+        assert await fs._cat(dest) == b"hello world"
+    finally:
+        if await fs._exists(src):
+            await fs._rm_file(src)
+        if await fs._exists(dest):
+            await fs._rm_file(dest)
 
 
 def test_read_block(temp_fs, all_test_data):
@@ -345,6 +461,58 @@ async def test_async_write_large(temp_afs):
     async with await fs._open_async(path, "wb", block_size=block_size) as f:
         await f.write(payload)
     assert await fs._cat(path) == payload
+
+
+def test_write_small_top_level_path_without_slash(fs):
+    name = f"test-write-root-{uuid.uuid4()}"
+    payload = b"hello world"
+    try:
+        with fs.open(name, "wb") as f:
+            f.write(payload)
+        assert fs.cat(name) == payload
+    finally:
+        fs.rm_file(name)
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_write_small_top_level_path_without_slash(function_afs):
+    fs = function_afs
+    name = f"test-write-root-{uuid.uuid4()}"
+    payload = b"hello world"
+    try:
+        async with await fs.open_async(name, "wb") as f:
+            await f.write(payload)
+        assert await fs._cat(name) == payload
+    finally:
+        await fs._rm_file(name)
+
+
+def test_write_large_top_level_path_without_slash(fs):
+    name = f"test-write-large-root-{uuid.uuid4()}"
+    mb = 2**20
+    payload = b"0" * mb
+    block_size = (2**10) * 320
+    try:
+        with fs.open(name, "wb", block_size=block_size) as f:
+            f.write(payload)
+        assert fs.cat(name) == payload
+    finally:
+        fs.rm_file(name)
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_write_large_top_level_path_without_slash(function_afs):
+    fs = function_afs
+    name = f"test-write-large-root-{uuid.uuid4()}"
+    mb = 2**20
+    payload = b"0" * mb
+    block_size = (2**10) * 320
+    try:
+        async with await fs.open_async(name, "wb", block_size=block_size) as f:
+            await f.write(payload)
+        assert await fs._cat(name) == payload
+    finally:
+        await fs._rm_file(name)
 
 
 def test_write_blocks(temp_fs):

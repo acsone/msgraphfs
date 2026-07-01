@@ -64,6 +64,15 @@ def parse_range_header(range_header):
         raise ValueError("Invalid Range header format")
 
 
+def split_parent_child(path: str) -> tuple[str, str]:
+    """Split a path into its parent path and its final component.
+
+    If ``path`` has no ``/`` separator, the parent is the empty string
+    (i.e. the item is considered a direct child of the root).
+    """
+    return path.rsplit("/", 1) if "/" in path else ("", path)
+
+
 def parse_msgraph_url(url_path):  # noqa: C901
     """Parse a msgraph URL to extract site_name, drive_name, and path.
 
@@ -655,7 +664,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             path1, item_id=source_item_id, action="copy"
         )
         path2 = self._strip_protocol(path2)
-        parent_path, _file_name = path2.rsplit("/", 1)
+        parent_path, _file_name = split_parent_child(path2)
         item_reference = await self._get_item_reference(parent_path)
         json = {
             "parentReference": item_reference,
@@ -898,7 +907,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     async def _mkdir(self, path, create_parents=True, exist_ok=False, **kwargs) -> str:
         path = self._strip_protocol(path).rstrip("/")
-        parent, child = path.rsplit("/", 1) if "/" in path else ("", path)
+        parent, child = split_parent_child(path)
         parent_id = await self._get_item_id(parent)
         if not parent_id and not create_parents:
             raise FileNotFoundError(f"Parent directory does not exists: {parent}")
@@ -968,7 +977,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         if destination_item_id:
             item_reference = await self._get_item_reference(path2)
         else:
-            parent_path, name = path2.rsplit("/", 1)
+            parent_path, name = split_parent_child(path2)
             item_reference = await self._get_item_reference(parent_path)
         json = {
             "parentReference": item_reference,
@@ -1078,7 +1087,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
                     url, json={"lastModifiedDateTime": datetime.now().isoformat()}
                 )
         else:
-            parent_path, file_name = path.rsplit("/", 1) if "/" in path else ("", path)
+            parent_path, file_name = split_parent_child(path)
             parent_id = await self._get_item_id(parent_path, throw_on_missing=True)
             item_id = f"{parent_id}:/{file_name}:"
             url = await self._path_to_url_async(path, item_id=item_id, action="content")
@@ -1911,7 +1920,7 @@ class AsyncStreamedFileMixin:
         """
         item_id = await self.item_id
         if not item_id:
-            parent_path, file_name = self.path.rsplit("/", 1)
+            parent_path, file_name = split_parent_child(self.path)
             parent_id = await self.fs._get_item_id(parent_path)
             item_id = f"{parent_id}:/{file_name}:"
         url = self.fs._path_to_url(
@@ -1951,7 +1960,7 @@ class AsyncStreamedFileMixin:
             headers["content-type"] = self.fs._guess_type(self.path)
         item_id = await self.item_id
         if not item_id:
-            parent_path, file_name = self.path.rsplit("/", 1)
+            parent_path, file_name = split_parent_child(self.path)
             parent_id = await self.fs._get_item_id(parent_path, throw_on_missing=True)
             item_id = f"{parent_id}:/{file_name}:"
         url = self.fs._path_to_url(self.path, item_id=item_id, action="content")
