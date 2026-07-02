@@ -184,3 +184,7 @@ To use this filesystem, you need to register an Azure AD application:
 6. Note the Application (client) ID, Directory (tenant) ID, and client secret
 
 The filesystem uses the OAuth2 client credentials flow with the default scope (`https://graph.microsoft.com/.default`), which automatically includes all application permissions granted to your Azure AD application.
+
+### Running the tests
+
+See [TESTING.md](TESTING.md) for how to run the test suite, including the live tests against a real SharePoint site.
