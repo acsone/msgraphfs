@@ -356,7 +356,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         parent_path = parent_path.split("root:")[1]
         if parent_path and not parent_path.startswith("/"):
             parent_path = "/" + parent_path
-        return parent_path + "/" + drive_item_info["name"]
+        return (parent_path + "/" + drive_item_info["name"]).lstrip("/")
 
     def _drive_item_info_to_fsspec_info(self, drive_item_info: dict) -> dict:
         """Convert a drive item info to a fsspec info dictionary.
