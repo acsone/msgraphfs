@@ -22,14 +22,14 @@ To use the filesystem with specific site and drive:
 import pandas as pd
 
 storage_options = {
-    'client_id': 'your-client-id',
-    'tenant_id': 'your-tenant-id',
-    'client_secret': 'your-client-secret',
-    'site_name': 'YourSiteName',
-    'drive_name': 'Documents'
+    "client_id": "your-client-id",
+    "tenant_id": "your-tenant-id",
+    "client_secret": "your-client-secret",
+    "site_name": "YourSiteName",
+    "drive_name": "Documents",
 }
 
-df = pd.read_csv('msgd://folder/data.csv', storage_options=storage_options)
+df = pd.read_csv("msgd://folder/data.csv", storage_options=storage_options)
 ```
 
 To use multi-site mode where site and drive are specified in the URL:
@@ -38,13 +38,17 @@ To use multi-site mode where site and drive are specified in the URL:
 import pandas as pd
 
 storage_options = {
-    'client_id': 'your-client-id',
-    'tenant_id': 'your-tenant-id',
-    'client_secret': 'your-client-secret'
+    "client_id": "your-client-id",
+    "tenant_id": "your-tenant-id",
+    "client_secret": "your-client-secret",
 }
 
-df = pd.read_csv('msgd://YourSite/Documents/folder/data.csv', storage_options=storage_options)
-df = pd.read_parquet('sharepoint://AnotherSite/Reports/data.parquet', storage_options=storage_options)
+df = pd.read_csv(
+    "msgd://YourSite/Documents/folder/data.csv", storage_options=storage_options
+)
+df = pd.read_parquet(
+    "sharepoint://AnotherSite/Reports/data.parquet", storage_options=storage_options
+)
 ```
 
 Accepted protocol / uri formats include:
@@ -59,8 +63,8 @@ To read files, you can optionally set the `MSGRAPHFS_CLIENT_ID`, `MSGRAPHFS_TENA
 import pandas as pd
 
 # With environment variables set, you can omit credentials from storage_options
-storage_options = {'site_name': 'YourSite', 'drive_name': 'Documents'}
-df = pd.read_csv('msgd://folder/data.csv', storage_options=storage_options)
+storage_options = {"site_name": "YourSite", "drive_name": "Documents"}
+df = pd.read_csv("msgd://folder/data.csv", storage_options=storage_options)
 ```
 
 Details
@@ -102,34 +106,36 @@ The filesystem can be used in different modes based on the `storage_options` pro
 1. **Single-site mode**: Specify `site_name` and `drive_name` in storage_options, then use relative paths in URLs:
    ```python
    storage_options = {
-       'client_id': CLIENT_ID,
-       'tenant_id': TENANT_ID,
-       'client_secret': CLIENT_SECRET,
-       'site_name': 'YourSite',
-       'drive_name': 'Documents'
+       "client_id": CLIENT_ID,
+       "tenant_id": TENANT_ID,
+       "client_secret": CLIENT_SECRET,
+       "site_name": "YourSite",
+       "drive_name": "Documents",
    }
-   df = pd.read_csv('msgd://folder/file.csv', storage_options=storage_options)
+   df = pd.read_csv("msgd://folder/file.csv", storage_options=storage_options)
    ```
 
 2. **Multi-site mode**: Omit `site_name` and `drive_name` from storage_options, specify them in the URL:
    ```python
    storage_options = {
-       'client_id': CLIENT_ID,
-       'tenant_id': TENANT_ID,
-       'client_secret': CLIENT_SECRET
+       "client_id": CLIENT_ID,
+       "tenant_id": TENANT_ID,
+       "client_secret": CLIENT_SECRET,
    }
-   df = pd.read_csv('msgd://YourSite/Documents/folder/file.csv', storage_options=storage_options)
+   df = pd.read_csv(
+       "msgd://YourSite/Documents/folder/file.csv", storage_options=storage_options
+   )
    ```
 
 3. **Direct drive access**: Use `drive_id` to bypass site discovery:
    ```python
    storage_options = {
-       'client_id': CLIENT_ID,
-       'tenant_id': TENANT_ID,
-       'client_secret': CLIENT_SECRET,
-       'drive_id': 'specific-drive-id'
+       "client_id": CLIENT_ID,
+       "tenant_id": TENANT_ID,
+       "client_secret": CLIENT_SECRET,
+       "drive_id": "specific-drive-id",
    }
-   df = pd.read_csv('msgd://folder/file.csv', storage_options=storage_options)
+   df = pd.read_csv("msgd://folder/file.csv", storage_options=storage_options)
    ```
 
 ### Advanced features
@@ -138,23 +144,23 @@ The filesystem can be used in different modes based on the `storage_options` pro
 ```python
 import fsspec
 
-fs = fsspec.filesystem('msgd', **storage_options)
+fs = fsspec.filesystem("msgd", **storage_options)
 
 # List files with detailed metadata
-files = fs.ls('/folder', detail=True)
+files = fs.ls("/folder", detail=True)
 
 # Get file information with permissions
-info = fs.info('/document.pdf', expand='permissions')
+info = fs.info("/document.pdf", expand="permissions")
 
 # Read file with version control
-with fs.open('/document.docx', mode='r') as f:
+with fs.open("/document.docx", mode="r") as f:
     content = f.read()
 ```
 
 #### Permission management
 ```python
 # Get detailed permissions for files and folders
-permissions = fs.get_permissions('/sensitive-folder')
+permissions = fs.get_permissions("/sensitive-folder")
 print(f"Total permissions: {permissions['summary']['total_permissions']}")
 ```
 
@@ -163,10 +169,12 @@ print(f"Total permissions: {permissions['summary']['total_permissions']}")
 import dask.dataframe as dd
 
 # Read multiple CSV files using Dask
-ddf = dd.read_csv('msgd://YourSite/Data/*.csv', storage_options=storage_options)
+ddf = dd.read_csv("msgd://YourSite/Data/*.csv", storage_options=storage_options)
 
 # Read Parquet files
-ddf = dd.read_parquet('sharepoint://Reports/Analytics/data.parquet', storage_options=storage_options)
+ddf = dd.read_parquet(
+    "sharepoint://Reports/Analytics/data.parquet", storage_options=storage_options
+)
 ```
 
 ### Azure AD Setup
